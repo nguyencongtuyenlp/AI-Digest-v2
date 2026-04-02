@@ -1,0 +1,32 @@
+# Manual social inbox
+#
+# Dùng cho các post quan trọng từ Facebook group/page/profile mà team đã đọc thủ công
+# và muốn đưa vào pipeline để:
+# - summarize
+# - score
+# - lưu Notion
+# - cân nhắc lên Telegram
+#
+# Mỗi item cách nhau bằng một dòng ---
+# Trường gợi ý:
+# - platform: facebook
+# - group: tên group/page nơi bạn thấy post
+# - author: tên người/post/page/group
+# - title: tiêu đề ngắn do bạn tự đặt
+# - url: link post Facebook
+# - posted_at: ISO time nếu biết, ví dụ 2026-03-31T08:15:00+07:00
+# - note: vì sao post này đáng chú ý
+# - content: copy phần text quan trọng của post
+# - comments: copy 2-5 ý quan trọng từ comment để hệ thấy phản ứng cộng đồng
+#
+# Ví dụ:
+# platform: facebook
+# group: AI Engineer Vietnam
+# author: AI Engineer Vietnam
+# title: Founder chia sẻ cách dùng MCP để nối CRM vào coding agent
+# url: https://www.facebook.com/groups/example/posts/123456789/
+# posted_at: 2026-03-31T08:15:00+07:00
+# note: Post này có demo thực tế, phù hợp gu agent/tool-use
+# content: Họ đang dùng Claude Code + MCP + CRM nội bộ để rút ngắn quy trình hỗ trợ sale...
+# comments: Nhiều comment xác nhận workflow này hữu ích khi đội kỹ thuật nhỏ; một số người nhắc cần kiểm soát permission và memory.
+# ---

@@ -1,0 +1,64 @@
+# Watchlist seed cho team / sếp
+#
+# Cách dùng:
+# - Dán URL cần theo dõi trực tiếp
+# - Hoặc thêm query dạng: query:từ khóa bạn muốn hệ ưu tiên tìm
+# - GitHub repo dạng: github_repo:owner/repo
+# - GitHub org dạng: github_org:openai
+# - GitHub query dạng: github_query:ai agents framework
+#
+# Ví dụ:
+# https://www.anthropic.com/news
+# https://openai.com/news
+# query:Anthropic MCP
+# query:OpenAI agents enterprise
+# github_repo:openai/openai-agents-python
+# github_org:huggingface
+# github_query:model context protocol
+
+# Founder-grade strategic watchlist
+https://openai.com/news
+https://www.anthropic.com/news
+https://about.fb.com/news
+https://aws.amazon.com/blogs/machine-learning/
+query:Anthropic MCP enterprise
+query:Anthropic Claude code enterprise
+query:Anthropic Claude Code release notes
+query:OpenAI agents enterprise workflow
+query:OpenAI API model release enterprise
+query:Google DeepMind AI benchmark infrastructure
+query:Meta open source AI model release
+query:xAI Grok enterprise API
+query:HuggingFace open source AI release
+query:AI infrastructure startup funding
+query:AI coding agent release enterprise
+query:AI security breach open source model tooling
+query:MCP server release enterprise agent
+query:AI startup Vietnam funding
+query:doanh nghiệp Việt Nam ứng dụng AI
+query:quy định luật AI Việt Nam
+
+# GitHub strategic watchlist
+github_org:openai
+github_org:anthropics
+github_org:huggingface
+github_org:langchain-ai
+github_org:microsoft
+github_org:modelcontextprotocol
+github_repo:openai/openai-agents-python
+github_repo:anthropics/claude-code
+github_repo:browser-use/browser-use
+github_repo:openai/codex-plugin-cc
+github_repo:langchain-ai/langgraph
+github_repo:microsoft/autogen
+github_repo:modelcontextprotocol/registry
+github_repo:Yeachan-Heo/oh-my-claudecode
+github_query:claude code
+github_query:ai agents framework
+github_query:model context protocol
+github_query:mcp server
+github_query:openclaw
+github_query:browser use agent
+github_query:computer use agent
+github_query:agent memory
+github_query:llm evals tooling

@@ -1,0 +1,20 @@
+# Facebook auto targets
+#
+# Format:
+#   Label | https://www.facebook.com/your-page-or-group
+#
+# Notes:
+# - Public pages may work without login, but groups usually need a logged-in session.
+# - Run `./.venv/bin/python facebook_login_setup.py` once to save the Facebook session
+#   into the dedicated Chrome profile used by the pipeline.
+# - Keep only the groups/pages that are truly worth monitoring.
+#
+Nghiện AI - Ứng Dụng AI Vào Công Việc Hàng Ngày | https://www.facebook.com/groups/ungdungaicongviec/
+Cơm AI lo | https://www.facebook.com/groups/comailo/
+OpenClaw VN | https://www.facebook.com/groups/2403721346759140/
+Chat GPT - ChatGPT Plus Việt Nam | https://www.facebook.com/groups/1458038445913086/
+# Optional extras if you want broader coverage later:
+# Nghiện AI page | https://www.facebook.com/nghienai/
+# Cộng Đồng OpenClaw Việt Nam | https://www.facebook.com/groups/openclawvietnam/
+# Cộng đồng AI Việt Nam | https://www.facebook.com/groups/groupaivietnam/
+# Vietnam AI Community | https://www.facebook.com/groups/vietaicommunity/

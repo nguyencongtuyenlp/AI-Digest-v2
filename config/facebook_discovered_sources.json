@@ -1,0 +1,22 @@
+[
+  {
+    "label": "OpenClaw VN",
+    "url": "https://www.facebook.com/groups/2403721346759140/",
+    "source_type": "group",
+    "discovery_origin": "joined",
+    "ai_source_score": 76,
+    "status": "auto_active",
+    "last_seen_at": "2026-04-02T00:00:00+00:00",
+    "last_crawled_at": ""
+  },
+  {
+    "label": "Việt Nguyễn AI",
+    "url": "https://www.facebook.com/vietnguyenai/",
+    "source_type": "profile",
+    "discovery_origin": "followed",
+    "ai_source_score": 61,
+    "status": "candidate",
+    "last_seen_at": "2026-04-02T00:00:00+00:00",
+    "last_crawled_at": ""
+  }
+]
