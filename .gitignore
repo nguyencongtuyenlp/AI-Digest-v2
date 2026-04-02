@@ -3,6 +3,8 @@
 config/.env
 *.session
 *.session-journal
+config/facebook_storage_state.json
+config/facebook_chrome_profile/
 
 # Database
 *.db
