@@ -24,6 +24,17 @@ from xai_grok import (
 logger = logging.getLogger(__name__)
 
 
+def _dynamic_per_type_limit(*article_groups: list[dict[str, Any]]) -> int:
+    lane_counts: dict[str, int] = {}
+    for group in article_groups:
+        for article in group:
+            lane = str(article.get("primary_type", "") or "").strip()
+            if not lane:
+                continue
+            lane_counts[lane] = lane_counts.get(lane, 0) + 1
+    return max(3, max(lane_counts.values(), default=0))
+
+
 def _prefix_experiment_messages(messages: list[str], header: str) -> list[str]:
     if not messages:
         return []
@@ -83,8 +94,6 @@ def summarize_vn_node(state: dict[str, Any]) -> dict[str, Any]:
     # Chỉ dùng các bài đã qua delivery judge để dựng brief.
     # Nếu không có candidate nào, hệ sẽ fallback sang history thay vì lôi toàn bộ final_articles lên Telegram.
     briefing_articles = list(state.get("telegram_candidates", []) or [])
-    github_briefing_articles = list(state.get("github_topic_candidates", []) or [])
-    facebook_briefing_articles = list(state.get("facebook_topic_candidates", []) or [])
     notion_pages = state.get("notion_pages", [])
     is_publish_run = str(state.get("run_mode", "preview") or "preview").strip().lower() == "publish"
     history_articles = get_history(
@@ -92,9 +101,10 @@ def summarize_vn_node(state: dict[str, Any]) -> dict[str, Any]:
         limit=80 if is_publish_run else 120,
     )
     runtime_config = dict(state.get("runtime_config", {}) or {})
+    per_type_limit = _dynamic_per_type_limit(briefing_articles)
 
     _apply_grok_news_copy(
-        [briefing_articles, github_briefing_articles, facebook_briefing_articles],
+        [briefing_articles],
         runtime_config=runtime_config,
         feedback_summary_text=str(state.get("feedback_summary_text", "") or ""),
     )
@@ -102,16 +112,12 @@ def summarize_vn_node(state: dict[str, Any]) -> dict[str, Any]:
     if (
         is_publish_run
         and not briefing_articles
-        and not github_briefing_articles
-        and not facebook_briefing_articles
         and not history_articles
     ):
         logger.info("📭 Không có candidate nào cho publish run; bỏ qua Telegram summary.")
         return {
             "summary_vn": "",
             "telegram_messages": [],
-            "github_topic_messages": [],
-            "facebook_topic_messages": [],
             "summary_mode": "no_candidates",
         }
 
@@ -123,9 +129,9 @@ def summarize_vn_node(state: dict[str, Any]) -> dict[str, Any]:
         }
     )
     include_empty_sections = True
-    if is_publish_run and briefing_articles and type_coverage < 6:
+    if is_publish_run and briefing_articles and type_coverage < 3:
         logger.info(
-            "🧭 Publish run chỉ có %d/6 type có main candidates; sẽ giữ đủ 6 topic và đánh dấu nhóm chưa có tin nổi bật.",
+            "🧭 Publish run chỉ có %d/3 lane có main candidates; sẽ giữ đủ 3 lane và đánh dấu nhóm chưa có tin nổi bật.",
             type_coverage,
         )
 
@@ -133,48 +139,12 @@ def summarize_vn_node(state: dict[str, Any]) -> dict[str, Any]:
         briefing_articles,
         notion_pages,
         history_articles=history_articles,
-        per_type=3,
+        per_type=per_type_limit,
         allow_archive_replay=True,
         include_empty_sections=include_empty_sections,
         allow_high_priority_overflow=True,
     )
-    github_topic_messages = _prefix_experiment_messages(
-        build_safe_digest_messages(
-            github_briefing_articles,
-            notion_pages,
-            history_articles=[],
-            per_type=2,
-            allow_archive_replay=False,
-            include_empty_sections=False,
-        ),
-        "<b>GitHub Repo Digest</b>",
-    )
-    facebook_topic_messages = _prefix_experiment_messages(
-        build_safe_digest_messages(
-            facebook_briefing_articles,
-            notion_pages,
-            history_articles=[],
-            per_type=2,
-            allow_archive_replay=False,
-            include_empty_sections=False,
-        ),
-        "<b>Facebook News</b>",
-    )
-
     if not telegram_messages:
-        if github_topic_messages or facebook_topic_messages:
-            logger.info(
-                "✅ Không có brief chính, nhưng đã dựng %d GitHub topic messages và %d Facebook topic messages.",
-                len(github_topic_messages),
-                len(facebook_topic_messages),
-            )
-            return {
-                "summary_vn": "",
-                "telegram_messages": [],
-                "github_topic_messages": github_topic_messages,
-                "facebook_topic_messages": facebook_topic_messages,
-                "summary_mode": "aux_topic_only",
-            }
         safe_summary = build_safe_digest(
             briefing_articles,
             notion_pages,
@@ -187,8 +157,6 @@ def summarize_vn_node(state: dict[str, Any]) -> dict[str, Any]:
         return {
             "summary_vn": safe_summary,
             "telegram_messages": [safe_summary],
-            "github_topic_messages": [],
-            "facebook_topic_messages": [],
             "summary_mode": "deterministic_fallback",
         }
 
@@ -197,7 +165,5 @@ def summarize_vn_node(state: dict[str, Any]) -> dict[str, Any]:
     return {
         "summary_vn": summary,
         "telegram_messages": telegram_messages,
-        "github_topic_messages": github_topic_messages,
-        "facebook_topic_messages": facebook_topic_messages,
         "summary_mode": "deterministic_sections",
     }

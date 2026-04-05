@@ -25,6 +25,17 @@ from editorial_guardrails import (
 logger = logging.getLogger(__name__)
 
 
+def _dynamic_per_type_limit(*article_groups: list[dict[str, Any]]) -> int:
+    lane_counts: dict[str, int] = {}
+    for group in article_groups:
+        for article in group:
+            lane = str(article.get("primary_type", "") or "").strip()
+            if not lane:
+                continue
+            lane_counts[lane] = lane_counts.get(lane, 0) + 1
+    return max(3, max(lane_counts.values(), default=0))
+
+
 def quality_gate_node(state: dict[str, Any]) -> dict[str, Any]:
     """
     Validate `summary_vn` before it is sent to Telegram.
@@ -34,8 +45,6 @@ def quality_gate_node(state: dict[str, Any]) -> dict[str, Any]:
     notion_pages = list(state.get("notion_pages", []))
     summary = str(state.get("summary_vn", "") or "")
     telegram_messages = list(state.get("telegram_messages", []) or [])
-    github_topic_messages = list(state.get("github_topic_messages", []) or [])
-    facebook_topic_messages = list(state.get("facebook_topic_messages", []) or [])
     is_publish_run = str(state.get("run_mode", "preview") or "preview").strip().lower() == "publish"
     history_articles = get_history(
         days=3 if is_publish_run else 7,
@@ -43,26 +52,14 @@ def quality_gate_node(state: dict[str, Any]) -> dict[str, Any]:
     )
     validation_articles = briefing_articles + history_articles
     summary_mode = str(state.get("summary_mode", "") or "")
+    per_type_limit = _dynamic_per_type_limit(briefing_articles, history_articles)
 
-    if summary_mode == "no_candidates" and not briefing_articles and not github_topic_messages and not facebook_topic_messages:
+    if summary_mode == "no_candidates" and not briefing_articles:
         logger.info("📭 Quality gate: không có candidate nào để gửi Telegram.")
         return {
             "summary_vn": "",
             "telegram_messages": [],
-            "github_topic_messages": github_topic_messages,
-            "facebook_topic_messages": facebook_topic_messages,
             "summary_mode": "no_candidates",
-            "summary_warnings": [],
-        }
-
-    if summary_mode == "aux_topic_only" and not briefing_articles:
-        logger.info("🧪 Quality gate: chỉ có auxiliary topics trong run này.")
-        return {
-            "summary_vn": "",
-            "telegram_messages": [],
-            "github_topic_messages": github_topic_messages,
-            "facebook_topic_messages": facebook_topic_messages,
-            "summary_mode": "aux_topic_only",
             "summary_warnings": [],
         }
 
@@ -76,7 +73,7 @@ def quality_gate_node(state: dict[str, Any]) -> dict[str, Any]:
             briefing_articles,
             notion_pages,
             history_articles=history_articles,
-            per_type=3,
+            per_type=per_type_limit,
             allow_archive_replay=True,
             include_empty_sections=True,
             allow_high_priority_overflow=True,
@@ -85,6 +82,7 @@ def quality_gate_node(state: dict[str, Any]) -> dict[str, Any]:
             briefing_articles,
             notion_pages,
             history_articles=history_articles,
+            max_articles=per_type_limit,
             allow_archive_replay=True,
             include_empty_sections=True,
             allow_high_priority_overflow=True,
@@ -93,8 +91,6 @@ def quality_gate_node(state: dict[str, Any]) -> dict[str, Any]:
         return {
             "summary_vn": safe_summary,
             "telegram_messages": safe_messages or [safe_summary],
-            "github_topic_messages": github_topic_messages,
-            "facebook_topic_messages": facebook_topic_messages,
             "summary_mode": "safe_fallback",
             "summary_warnings": warnings or ["empty_summary"],
         }
@@ -103,8 +99,6 @@ def quality_gate_node(state: dict[str, Any]) -> dict[str, Any]:
     return {
         "summary_vn": summary,
         "telegram_messages": telegram_messages or [summary],
-        "github_topic_messages": github_topic_messages,
-        "facebook_topic_messages": facebook_topic_messages,
         "summary_mode": summary_mode or "deterministic_sections",
         "summary_warnings": [],
     }

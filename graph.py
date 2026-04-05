@@ -3,8 +3,8 @@ graph.py — LangGraph StateGraph: Daily Digest AI Agent (MVP2).
 
 Pipeline mới với conditional edges (Structured Agent):
   gather → normalize_source → deduplicate → classify_and_score
-    → [score >= 60?] → deep_analysis → recommend_idea → compose_note_summary
-    → [score < 60?]  → compose_note_summary
+    → [lọt shortlist động?] → deep_analysis → recommend_idea → compose_note_summary
+    → [không lọt shortlist] → compose_note_summary
   → delivery_judge → save_notion → summarize_vn → quality_gate → send_telegram → END
 
 Khác biệt so với MVP1:
@@ -33,13 +33,12 @@ class DigestState(TypedDict, total=False):
     persist_local: bool
     started_at: str
     runtime_config: dict[str, Any]
+    source_health: dict[str, str]
+    source_health_alert_sent: bool
 
     # Bước 1: Thu thập
     raw_articles: list[dict[str, Any]]
     grok_scout_count: int
-    facebook_discovered_sources: list[dict[str, Any]]
-    facebook_auto_active_sources: list[dict[str, Any]]
-    facebook_candidate_sources: list[dict[str, Any]]
     gather_snapshot_path: str
 
     # Bước 2: Sau deduplicate
@@ -49,6 +48,7 @@ class DigestState(TypedDict, total=False):
     recent_feedback: list[dict[str, Any]]
     feedback_summary_text: str
     feedback_label_counts: dict[str, int]
+    feedback_preference_profile: dict[str, Any]
     feedback_sync: dict[str, Any]
 
     # Bước 3: Sau classify + score
@@ -69,17 +69,14 @@ class DigestState(TypedDict, total=False):
 
     # Bước 8: Tập bài được judge là đủ tốt để lên Telegram
     telegram_candidates: list[dict[str, Any]]
-    github_topic_candidates: list[dict[str, Any]]
-    facebook_topic_candidates: list[dict[str, Any]]
 
     # Bước 9: Notion URLs cho từng bài
     notion_pages: list[dict[str, Any]]
+    topic_pages: list[dict[str, Any]]
 
     # Bước 10: Bản tổng hợp tiếng Việt
     summary_vn: str
     telegram_messages: list[str]
-    github_topic_messages: list[str]
-    facebook_topic_messages: list[str]
 
     # Bước 11: Metadata chất lượng của bản brief
     summary_mode: str
@@ -87,11 +84,11 @@ class DigestState(TypedDict, total=False):
 
     # Bước 12: Trạng thái gửi Telegram
     telegram_sent: bool
-    github_topic_sent: bool
-    facebook_topic_sent: bool
 
     # Bước 13: Báo cáo run để review với team / sếp
     run_report_path: str
+    weekly_memo_path: str
+    watchlist_report_path: str
     run_health: dict[str, Any]
     publish_ready: bool
     grok_source_gap_suggestions: list[dict[str, Any]]
@@ -120,7 +117,7 @@ from nodes.generate_run_report import generate_run_report_node
 def _route_after_score(state: DigestState) -> str:
     """
     Conditional edge: sau classify_and_score, kiểm tra xem có bài nào
-    đủ điểm (score >= 60) để phân tích sâu không.
+    lọt shortlist động để phân tích sâu không.
 
     Returns:
         'deep_analysis' nếu có bài top, 'compose_note_summary' nếu không có

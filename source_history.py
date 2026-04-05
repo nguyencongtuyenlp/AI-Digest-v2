@@ -412,18 +412,8 @@ def record_source_history_run(state: dict[str, Any]) -> None:
 
     _aggregate_batch_counts([item for item in state.get("scored_articles", []) if isinstance(item, dict)], "scored_articles", bucket)
     _aggregate_batch_counts([item for item in state.get("telegram_candidates", []) if isinstance(item, dict)], "selected_main", bucket)
-    _aggregate_batch_counts([item for item in state.get("github_topic_candidates", []) if isinstance(item, dict)], "selected_github", bucket)
-    _aggregate_batch_counts([item for item in state.get("facebook_topic_candidates", []) if isinstance(item, dict)], "selected_facebook", bucket)
 
     for article in state.get("telegram_candidates", []) or []:
-        if not isinstance(article, dict):
-            continue
-        bucket.setdefault(build_source_history_key(article), _base_stats(article))["last_selected_at"] = now
-    for article in state.get("github_topic_candidates", []) or []:
-        if not isinstance(article, dict):
-            continue
-        bucket.setdefault(build_source_history_key(article), _base_stats(article))["last_selected_at"] = now
-    for article in state.get("facebook_topic_candidates", []) or []:
         if not isinstance(article, dict):
             continue
         bucket.setdefault(build_source_history_key(article), _base_stats(article))["last_selected_at"] = now

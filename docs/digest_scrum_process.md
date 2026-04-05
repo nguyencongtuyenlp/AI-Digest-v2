@@ -299,7 +299,7 @@ Những câu hỏi retro quan trọng:
 
 - `Notion pages` cho từng bài
 - `Telegram main brief`
-- `GitHub topic messages`
+- `telegram_messages`
 - `Facebook topic messages`
 - `run report markdown`
 - `temporal snapshots`

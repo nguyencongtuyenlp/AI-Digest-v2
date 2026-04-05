@@ -91,29 +91,27 @@ def send_telegram_node(state: dict[str, Any]) -> dict[str, Any]:
     """
     if not bool(state.get("publish_telegram", True)):
         logger.info("🧪 Preview mode: bỏ qua publish Telegram.")
-        return {"telegram_sent": False, "github_topic_sent": False, "facebook_topic_sent": False}
+        return {"telegram_sent": False}
 
     bot_token = os.getenv("TELEGRAM_BOT_TOKEN")
     chat_id = os.getenv("TELEGRAM_CHAT_ID")
 
     if not bot_token or not chat_id:
         logger.warning("⚠️ Telegram credentials chưa cấu hình — bỏ qua.")
-        return {"telegram_sent": False, "github_topic_sent": False, "facebook_topic_sent": False}
+        return {"telegram_sent": False}
 
     telegram_messages = [msg for msg in state.get("telegram_messages", []) if str(msg or "").strip()]
-    github_topic_messages = [msg for msg in state.get("github_topic_messages", []) if str(msg or "").strip()]
-    facebook_topic_messages = [msg for msg in state.get("facebook_topic_messages", []) if str(msg or "").strip()]
     if not telegram_messages:
-        if str(state.get("summary_mode", "") or "") == "no_candidates" and not github_topic_messages and not facebook_topic_messages:
+        if str(state.get("summary_mode", "") or "") == "no_candidates":
             logger.info("📭 Không có bài nào đủ chuẩn để gửi Telegram trong run này.")
-            return {"telegram_sent": False, "github_topic_sent": False, "facebook_topic_sent": False}
+            return {"telegram_sent": False}
         summary = str(state.get("summary_vn", "") or "")
         if summary.strip():
             telegram_messages = [summary]
 
-    if not telegram_messages and not github_topic_messages and not facebook_topic_messages:
+    if not telegram_messages:
         logger.warning("⚠️ Không có summary để gửi.")
-        return {"telegram_sent": False, "github_topic_sent": False, "facebook_topic_sent": False}
+        return {"telegram_sent": False}
 
     summary_mode = state.get("summary_mode", "unknown")
     summary_warnings = state.get("summary_warnings", [])
@@ -153,76 +151,4 @@ def send_telegram_node(state: dict[str, Any]) -> dict[str, Any]:
         else:
             logger.error("❌ Telegram gửi thất bại cho main thread=%s!", thread_id)
 
-    github_topic_thread_id_str = os.getenv("TELEGRAM_GITHUB_THREAD_ID", "")
-    github_topic_thread_id = int(github_topic_thread_id_str) if github_topic_thread_id_str else None
-    github_topic_sent = False
-
-    if github_topic_messages:
-        if not github_topic_thread_id:
-            logger.info("🧪 Có GitHub topic messages nhưng chưa có TELEGRAM_GITHUB_THREAD_ID, nên bỏ qua gửi.")
-        else:
-            github_success = True
-            for index, message in enumerate(github_topic_messages, 1):
-                sent = _send_message(bot_token, chat_id, message, github_topic_thread_id)
-                github_success = github_success and sent
-                if sent:
-                    logger.info(
-                        "✅ GitHub topic chunk %d/%d sent",
-                        index,
-                        len(github_topic_messages),
-                    )
-                else:
-                    logger.error(
-                        "❌ GitHub topic chunk %d/%d failed",
-                        index,
-                        len(github_topic_messages),
-                    )
-            github_topic_sent = github_success
-            if github_success:
-                logger.info(
-                    "✅ GitHub topic messages sent to chat=%s thread=%s",
-                    chat_id,
-                    github_topic_thread_id,
-                )
-            else:
-                logger.error("❌ GitHub topic gửi thất bại!")
-
-    facebook_topic_thread_id_str = os.getenv("TELEGRAM_FACEBOOK_THREAD_ID", "")
-    facebook_topic_thread_id = int(facebook_topic_thread_id_str) if facebook_topic_thread_id_str else None
-    facebook_topic_sent = False
-
-    if facebook_topic_messages:
-        if not facebook_topic_thread_id:
-            logger.info("🧪 Có Facebook topic messages nhưng chưa có TELEGRAM_FACEBOOK_THREAD_ID, nên bỏ qua gửi.")
-        else:
-            facebook_success = True
-            for index, message in enumerate(facebook_topic_messages, 1):
-                sent = _send_message(bot_token, chat_id, message, facebook_topic_thread_id)
-                facebook_success = facebook_success and sent
-                if sent:
-                    logger.info(
-                        "✅ Facebook topic chunk %d/%d sent",
-                        index,
-                        len(facebook_topic_messages),
-                    )
-                else:
-                    logger.error(
-                        "❌ Facebook topic chunk %d/%d failed",
-                        index,
-                        len(facebook_topic_messages),
-                    )
-            facebook_topic_sent = facebook_success
-            if facebook_success:
-                logger.info(
-                    "✅ Facebook topic messages sent to chat=%s thread=%s",
-                    chat_id,
-                    facebook_topic_thread_id,
-                )
-            else:
-                logger.error("❌ Facebook topic gửi thất bại!")
-
-    return {
-        "telegram_sent": success,
-        "github_topic_sent": github_topic_sent,
-        "facebook_topic_sent": facebook_topic_sent,
-    }
+    return {"telegram_sent": success}

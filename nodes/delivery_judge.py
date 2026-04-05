@@ -23,21 +23,13 @@ from mlx_runner import run_json_inference
 from xai_grok import (
     grok_delivery_enabled,
     grok_delivery_max_articles,
-    grok_facebook_max_articles,
-    grok_facebook_score_enabled,
     grok_final_editor_enabled,
     grok_final_editor_max_articles,
     rerank_delivery_articles,
-    rerank_facebook_topic_articles,
     rerank_final_digest_articles,
 )
 
 logger = logging.getLogger(__name__)
-
-GITHUB_TOPIC_DOMAINS = {
-    "github.com",
-    "www.github.com",
-}
 FACEBOOK_TOPIC_DOMAINS = {
     "facebook.com",
     "www.facebook.com",
@@ -47,34 +39,14 @@ FACEBOOK_TOPIC_DOMAINS = {
 }
 
 LANE_TAG_HINTS: dict[str, set[str]] = {
-    "Research": {"research"},
-    "Product": {"product_update", "api_platform", "model_release"},
-    "Business": {"funding", "acquisition", "partnership", "market_competition", "enterprise_ai"},
-    "Policy & Ethics": {"regulation", "safety", "government"},
-    "Society & Culture": {"education", "healthcare", "vietnam", "southeast_asia"},
+    "Product": {"product_update", "api_platform", "model_release", "enterprise_ai", "infrastructure"},
+    "Society & Culture": {"regulation", "safety", "government", "education", "healthcare", "vietnam", "southeast_asia"},
     "Practical": {"developer_tools", "ai_agents", "open_source"},
 }
 
 LANE_TEXT_HINTS: dict[str, tuple[str, ...]] = {
-    "Research": ("research", "paper", "benchmark", "study", "evaluation", "scientist"),
     "Product": ("launch", "launched", "release", "released", "feature", "api", "sdk", "model", "platform", "preview", "beta"),
-    "Business": (
-        "startup",
-        "funding",
-        "raised",
-        "raises",
-        "valuation",
-        "revenue",
-        "market",
-        "competition",
-        "partnership",
-        "partner",
-        "acquisition",
-        "merger",
-        "strategy",
-        "enterprise deal",
-    ),
-    "Policy & Ethics": (
+    "Society & Culture": (
         "regulation",
         "policy",
         "law",
@@ -88,8 +60,16 @@ LANE_TEXT_HINTS: dict[str, tuple[str, ...]] = {
         "compromise",
         "lawsuit",
         "investigation",
+        "education",
+        "student",
+        "school",
+        "community",
+        "culture",
+        "workforce",
+        "jobs",
+        "hospital",
+        "medical",
     ),
-    "Society & Culture": ("education", "student", "school", "community", "culture", "workforce", "jobs", "hospital", "medical"),
     "Practical": ("tutorial", "guide", "workflow", "how to", "playbook", "best practice", "tooling"),
 }
 
@@ -110,6 +90,32 @@ Trả về JSON:
   "rationale": "1 câu ngắn"
 }
 """
+
+DELIVERY_JUDGE_RESPONSE_FORMAT: dict[str, Any] = {
+    "type": "json_schema",
+    "json_schema": {
+        "name": "delivery_judge_article",
+        "strict": True,
+        "schema": {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "groundedness_score": {"type": "integer", "minimum": 0, "maximum": 5},
+                "freshness_score": {"type": "integer", "minimum": 0, "maximum": 5},
+                "operator_value_score": {"type": "integer", "minimum": 0, "maximum": 5},
+                "decision": {"type": "string", "enum": ["include", "review", "skip"]},
+                "rationale": {"type": "string"},
+            },
+            "required": [
+                "groundedness_score",
+                "freshness_score",
+                "operator_value_score",
+                "decision",
+                "rationale",
+            ],
+        },
+    },
+}
 
 DELIVERY_JUDGE_USER_TEMPLATE = """Hãy chấm bài sau cho Telegram brief:
 
@@ -173,7 +179,6 @@ def _deterministic_delivery_assessment(article: dict[str, Any]) -> dict[str, Any
     event_cluster_size = int(article.get("event_cluster_size", 1) or 1)
     is_ai_relevant = article.get("is_ai_relevant", True) is not False
     title = str(article.get("title", "") or "")
-    lane_hint = str(article.get("delivery_lane_hint", "") or "").strip().lower()
     source_history_penalty = int(article.get("source_history_penalty", 0) or 0)
     source_history_bonus = int(article.get("source_history_bonus", 0) or 0)
     source_history_noise_rate = float(article.get("source_history_noise_rate", 0.0) or 0.0)
@@ -187,16 +192,8 @@ def _deterministic_delivery_assessment(article: dict[str, Any]) -> dict[str, Any
         operator_value_score = max(operator_value_score, 3)
     if source_kind == "strong_media" and score >= 45:
         operator_value_score = max(operator_value_score, 3)
-
-    if lane_hint in {"github_topic", "facebook_topic"}:
-        return {
-            "groundedness_score": groundedness_score,
-            "freshness_score": freshness_score,
-            "operator_value_score": operator_value_score,
-            "decision": "skip",
-            "rationale": "Bài này thuộc lane phụ, không nên cạnh tranh vào main brief.",
-            "skip_reason": "lane_locked",
-        }
+    if source_kind == "github" and score >= 50:
+        operator_value_score = max(operator_value_score, 3)
 
     if not is_ai_relevant:
         return {
@@ -339,7 +336,9 @@ def _deterministic_delivery_assessment(article: dict[str, Any]) -> dict[str, Any
         decision = "include"
     elif source_kind in {"official", "strong_media"} and avg >= 2.8 and score >= 35:
         decision = "include"
-    elif avg >= 2.5:
+    elif source_kind == "github" and avg >= 2.9 and score >= 48:
+        decision = "include"
+    elif avg >= 2.5 or (score >= 42 and str(article.get("relevance_level", "") or "").lower() == "high"):
         decision = "review"
     else:
         decision = "skip"
@@ -361,132 +360,9 @@ def _deterministic_delivery_assessment(article: dict[str, Any]) -> dict[str, Any
         "skip_reason": "weak_signal" if decision == "skip" else "",
     }
 
-
-def _is_github_topic_article(article: dict[str, Any]) -> bool:
-    domain = str(article.get("source_domain", "") or "").strip().lower()
-    source = str(article.get("source", "") or "").strip().lower()
-    return (
-        domain in GITHUB_TOPIC_DOMAINS
-        or bool(str(article.get("github_full_name", "") or "").strip())
-        or str(article.get("github_signal_type", "") or "").strip().lower() in {"repository", "release"}
-        or "github" in source
-    )
-
-
-def _github_topic_delivery_assessment(article: dict[str, Any]) -> dict[str, Any]:
-    """
-    Judge riêng cho GitHub repo topic.
-
-    Mục tiêu:
-    - Tách repo/release khỏi brief công nghệ chính
-    - Vẫn chặn repo quá yếu / quá cũ / không đủ liên quan AI-agent
-    - Ưu tiên repo có tín hiệu activity hoặc stars đủ tốt
-    """
-    score = int(article.get("total_score", 0) or 0)
-    confidence = str(article.get("confidence_label", "low")).lower()
-    content_available = bool(article.get("content_available", False))
-    freshness_unknown = bool(article.get("freshness_unknown", False))
-    is_stale_candidate = bool(article.get("is_stale_candidate", False))
-    is_old_news = bool(article.get("is_old_news", False))
-    age_hours = article.get("age_hours")
-    event_is_primary = bool(article.get("event_is_primary", True))
-    is_ai_relevant = article.get("is_ai_relevant", True) is not False
-    note_summary_vi = str(article.get("note_summary_vi", "") or "").strip()
-    snippet = str(article.get("snippet", "") or "").strip()
-    stars = int(article.get("github_stars", 0) or 0)
-    signal_type = str(article.get("github_signal_type", "") or "").strip().lower()
-
-    groundedness_score = 4 if content_available else 3
-    if signal_type == "release":
-        groundedness_score = min(5, groundedness_score + 1)
-    if confidence == "high":
-        groundedness_score = min(5, groundedness_score + 1)
-
-    freshness_score = 4
-    if freshness_unknown:
-        freshness_score = 3
-    if is_old_news:
-        freshness_score = 2
-    if is_stale_candidate:
-        freshness_score = 1
-    if isinstance(age_hours, (int, float)) and age_hours <= 168:
-        freshness_score = min(5, freshness_score + 1)
-
-    operator_value_score = 4 if score >= 55 else 3 if score >= 38 else 2 if score >= 24 else 1
-    if stars >= 1000:
-        operator_value_score = min(5, operator_value_score + 1)
-
-    if not is_ai_relevant:
-        return {
-            "groundedness_score": groundedness_score,
-            "freshness_score": freshness_score,
-            "operator_value_score": 0,
-            "decision": "skip",
-            "rationale": "Repo chưa đủ liên quan trực tiếp tới AI/agent để đưa vào topic GitHub.",
-        }
-
-    if not event_is_primary:
-        return {
-            "groundedness_score": groundedness_score,
-            "freshness_score": freshness_score,
-            "operator_value_score": operator_value_score,
-            "decision": "skip",
-            "rationale": "Repo/release này trùng event với một tín hiệu GitHub mạnh hơn trong cùng batch.",
-        }
-
-    if not content_available and not note_summary_vi and not snippet:
-        return {
-            "groundedness_score": groundedness_score,
-            "freshness_score": freshness_score,
-            "operator_value_score": operator_value_score,
-            "decision": "skip",
-            "rationale": "Repo quá mỏng để đưa vào topic GitHub riêng.",
-        }
-
-    if is_stale_candidate:
-        decision = "review" if score >= 45 and content_available else "skip"
-        return {
-            "groundedness_score": groundedness_score,
-            "freshness_score": freshness_score,
-            "operator_value_score": operator_value_score,
-            "decision": decision,
-            "rationale": "Repo/release có dấu hiệu cũ; chỉ nên giữ ở mức review nếu vẫn còn giá trị theo dõi.",
-        }
-
-    avg = (groundedness_score + freshness_score + operator_value_score) / 3
-    if score >= 30 and avg >= 2.8:
-        decision = "include"
-        rationale = "Đủ tốt để vào topic GitHub riêng."
-    elif score >= 24 and avg >= 2.3:
-        decision = "review"
-        rationale = "Có tín hiệu nhưng nên xem đây là lane theo dõi phụ."
-    else:
-        decision = "skip"
-        rationale = "Tín hiệu vẫn còn quá yếu cho topic GitHub."
-
-    return {
-        "groundedness_score": groundedness_score,
-        "freshness_score": freshness_score,
-        "operator_value_score": operator_value_score,
-        "decision": decision,
-        "rationale": rationale,
-    }
-
-
 def _is_facebook_topic_article(article: dict[str, Any]) -> bool:
-    domain = str(article.get("source_domain", "") or "").strip().lower()
-    source = str(article.get("source", "") or "").strip().lower()
-    platform = str(article.get("social_platform", "") or "").strip().lower()
-    lane_hint = str(article.get("delivery_lane_hint", "") or "").strip().lower()
-    url = str(article.get("url", "") or "").strip().lower()
-    return (
-        platform == "facebook"
-        or lane_hint == "facebook_topic"
-        or domain in FACEBOOK_TOPIC_DOMAINS
-        or "facebook" in source
-        or "facebook.com/" in url
-        or "fb.com/" in url
-    )
+    # Facebook lane riêng đã bị loại khỏi delivery path.
+    return False
 
 
 def _facebook_topic_delivery_assessment(
@@ -723,7 +599,9 @@ def _infer_skip_reason_from_article(article: dict[str, Any]) -> str:
         return "not_ai"
     if any(token in rationale for token in ("tín hiệu yếu", "quá mỏng", "quá yếu")):
         return "weak_signal"
-    return ""
+    if any(token in rationale for token in ("không đủ mạnh", "chưa đủ mạnh", "chưa đủ sắc", "chưa vượt trội")):
+        return "editorial_cut"
+    return "editorial_cut"
 
 
 def _candidate_sort_key(article: dict[str, Any]) -> tuple[int, int, int]:
@@ -733,6 +611,104 @@ def _candidate_sort_key(article: dict[str, Any]) -> tuple[int, int, int]:
         int(article.get("total_score", 0) or 0),
         int(article.get("event_source_count", 1) or 1),
     )
+
+
+def _review_rescue_sort_key(article: dict[str, Any]) -> tuple[int, int, int, int, int]:
+    relevance = str(article.get("relevance_level", "") or "").strip().lower()
+    source_tier = str(article.get("source_tier", "") or "").strip().lower()
+    return (
+        1 if relevance == "high" else 0,
+        1 if source_tier in {"a", "b"} else 0,
+        int(article.get("grok_priority_score", -1) or -1),
+        int(article.get("delivery_score", 0) or 0),
+        int(article.get("total_score", 0) or 0),
+    )
+
+
+def _is_promotable_review(article: dict[str, Any]) -> bool:
+    if str(article.get("delivery_decision", "") or "").strip().lower() != "review":
+        return False
+    if article.get("is_ai_relevant") is False or not bool(article.get("event_is_primary", True)):
+        return False
+    if _is_facebook_topic_article(article):
+        return False
+
+    source_kind = str(article.get("source_kind", "") or "").strip().lower()
+    source_tier = str(article.get("source_tier", "") or "").strip().lower()
+    relevance = str(article.get("relevance_level", "") or "").strip().lower()
+    score = int(article.get("total_score", 0) or 0)
+    stale = bool(article.get("is_stale_candidate", False) or article.get("is_old_news", False))
+
+    if stale and not (source_tier == "a" and score >= 72):
+        return False
+    if score >= 58:
+        return True
+    if relevance == "high" and score >= 45:
+        return True
+    if source_kind in {"official", "strong_media", "review"} and score >= 45:
+        return True
+    if source_kind == "github" and score >= 52:
+        return True
+    if int(article.get("grok_priority_score", -1) or -1) >= 62 and score >= 42:
+        return True
+    return False
+
+
+def _promote_review_articles(reviewed_articles: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    promoted_pool = [
+        article for article in reviewed_articles
+        if article.get("delivery_decision") == "include"
+        and not _is_facebook_topic_article(article)
+    ]
+    promotable_reviews = [
+        article for article in reviewed_articles
+        if _is_promotable_review(article)
+    ]
+    if not promotable_reviews:
+        return promoted_pool
+
+    current_types = {
+        canonical_type_name(article.get("primary_type"))
+        for article in promoted_pool
+        if canonical_type_name(article.get("primary_type"))
+    }
+    rescued: list[dict[str, Any]] = []
+    rescue_target = max(5, len(promoted_pool))
+
+    for lane in ("Product", "Society & Culture", "Practical"):
+        if lane in current_types:
+            continue
+        lane_candidates = sorted(
+            [
+                article for article in promotable_reviews
+                if canonical_type_name(article.get("primary_type")) == lane
+            ],
+            key=_review_rescue_sort_key,
+            reverse=True,
+        )
+        if not lane_candidates:
+            continue
+        article = lane_candidates[0]
+        article["delivery_decision"] = "include"
+        article["delivery_promoted_from_review"] = True
+        article["delivery_skip_reason"] = ""
+        article["delivery_rationale"] = "Bài được kéo lên main brief để giữ lane này không bị rỗng và vẫn đủ đáng đọc."
+        rescued.append(article)
+        current_types.add(lane)
+
+    if len(promoted_pool) + len(rescued) < rescue_target:
+        for article in sorted(promotable_reviews, key=_review_rescue_sort_key, reverse=True):
+            if article in rescued:
+                continue
+            article["delivery_decision"] = "include"
+            article["delivery_promoted_from_review"] = True
+            article["delivery_skip_reason"] = ""
+            article["delivery_rationale"] = "Bài được kéo từ lớp review lên main brief để batch không bỏ sót tín hiệu mạnh."
+            rescued.append(article)
+            if len(promoted_pool) + len(rescued) >= rescue_target:
+                break
+
+    return promoted_pool + rescued
 
 
 def _sync_primary_type(article: dict[str, Any]) -> None:
@@ -775,14 +751,7 @@ def _should_apply_lane_override(article: dict[str, Any], lane_override: str) -> 
     current_score = signal_counts.get(current_lane, 0)
 
     if target_lane == "Product":
-        blocker_score = max(
-            signal_counts.get("Business", 0),
-            signal_counts.get("Policy & Ethics", 0),
-        )
-        return target_score >= 2 and target_score > blocker_score
-
-    if target_lane in {"Business", "Policy & Ethics"}:
-        return target_score >= max(1, current_score)
+        return target_score >= max(2, current_score)
 
     return target_score >= max(1, current_score + 1)
 
@@ -810,8 +779,7 @@ def _apply_grok_delivery_rerank(
     shortlist = _select_diverse_candidates(
         [
             article for article in reviewed_articles
-            if not _is_github_topic_article(article)
-            and not _is_facebook_topic_article(article)
+            if not _is_facebook_topic_article(article)
             and str(article.get("delivery_decision", "") or "").lower() in {"include", "review"}
             and bool(article.get("event_is_primary", True))
         ],
@@ -851,60 +819,6 @@ def _apply_grok_delivery_rerank(
         sum(1 for article in shortlist if article.get("grok_delivery_decision")),
         len(shortlist),
     )
-
-
-def _apply_grok_facebook_topic_rerank(
-    reviewed_articles: list[dict[str, Any]],
-    *,
-    runtime_config: dict[str, Any],
-    feedback_summary_text: str = "",
-) -> None:
-    if not grok_facebook_score_enabled(runtime_config):
-        return
-
-    shortlist = _select_diverse_candidates(
-        [
-            article for article in reviewed_articles
-            if _is_facebook_topic_article(article)
-            and str(article.get("delivery_decision", "") or "").lower() in {"include", "review"}
-            and bool(article.get("event_is_primary", True))
-        ],
-        limit=grok_facebook_max_articles(runtime_config),
-        diversify_by_type=False,
-    )
-    if len(shortlist) < 1:
-        return
-
-    logger.info("🧠 Grok Facebook judge: scoring %d shortlist articles.", len(shortlist))
-    reranked = rerank_facebook_topic_articles(shortlist, feedback_summary_text=feedback_summary_text)
-    if not reranked:
-        return
-
-    updated = 0
-    for article in shortlist:
-        article_key = article.get("url", "") or article.get("title", "")
-        judged = reranked.get(article_key)
-        if not judged:
-            continue
-        article["grok_priority_score"] = int(judged.get("priority_score", 0) or 0)
-        article["grok_facebook_decision"] = str(judged.get("decision", article.get("delivery_decision", "review")) or "review")
-        article["grok_facebook_rationale"] = str(judged.get("rationale", "") or "")
-        article["grok_facebook_trust_score"] = int(judged.get("trust_score", 0) or 0)
-        article["grok_facebook_usefulness_score"] = int(judged.get("usefulness_score", 0) or 0)
-        article["grok_facebook_newsworthiness_score"] = int(judged.get("newsworthiness_score", 0) or 0)
-        blurb = str(judged.get("blurb", "") or "").strip()
-        if blurb:
-            article["telegram_blurb_vi"] = blurb
-
-        decision = str(judged.get("decision", "") or "").strip().lower()
-        if decision in {"include", "review", "skip"}:
-            article["delivery_decision"] = decision
-        rationale = str(judged.get("rationale", "") or "").strip()
-        if rationale:
-            article["delivery_rationale"] = rationale
-        updated += 1
-
-    logger.info("✅ Grok Facebook judge applied to %d/%d shortlist articles.", updated, len(shortlist))
 
 
 def _apply_grok_final_editor_pass(
@@ -977,8 +891,6 @@ def delivery_judge_node(state: dict[str, Any]) -> dict[str, Any]:
     if not final_articles:
         return {
             "telegram_candidates": [],
-            "github_topic_candidates": [],
-            "facebook_topic_candidates": [],
         }
     runtime_config = dict(state.get("runtime_config", {}) or {})
 
@@ -987,19 +899,15 @@ def delivery_judge_node(state: dict[str, Any]) -> dict[str, Any]:
         _sync_primary_type(article)
         grounding = article if article.get("grounding_note") else build_article_grounding(article)
         article.update(grounding)
-        is_github_article = _is_github_topic_article(article)
         is_facebook_article = _is_facebook_topic_article(article)
-        if is_github_article:
-            base = _github_topic_delivery_assessment(article)
-        elif is_facebook_article:
+        if is_facebook_article:
             base = _facebook_topic_delivery_assessment(article, runtime_config=runtime_config)
         else:
             base = _deterministic_delivery_assessment(article)
 
         judged: dict[str, Any] | None = None
         should_call_judge = (
-            not is_github_article
-            and not is_facebook_article
+            not is_facebook_article
             and base["decision"] != "skip"
             and bool(article.get("event_is_primary", True))
         )
@@ -1028,6 +936,7 @@ def delivery_judge_node(state: dict[str, Any]) -> dict[str, Any]:
                     ),
                     max_tokens=250,
                     temperature=0.1,
+                    response_format=DELIVERY_JUDGE_RESPONSE_FORMAT,
                 )
             except Exception as exc:
                 logger.debug("Delivery judge fallback for '%s': %s", article.get("title", "")[:50], exc)
@@ -1046,39 +955,12 @@ def delivery_judge_node(state: dict[str, Any]) -> dict[str, Any]:
         runtime_config=runtime_config,
         feedback_summary_text=str(state.get("feedback_summary_text", "") or ""),
     )
-    _apply_grok_facebook_topic_rerank(
-        reviewed_articles,
-        runtime_config=runtime_config,
-        feedback_summary_text=str(state.get("feedback_summary_text", "") or ""),
-    )
+    main_include_articles = _promote_review_articles(reviewed_articles)
 
     telegram_candidates = _select_diverse_candidates(
-        [
-            article for article in reviewed_articles
-            if article.get("delivery_decision") == "include"
-            and not _is_github_topic_article(article)
-            and not _is_facebook_topic_article(article)
-        ],
-        limit=12,
+        main_include_articles,
+        limit=max(1, len(main_include_articles)),
         diversify_by_type=True,
-    )
-    github_topic_candidates = _select_diverse_candidates(
-        [
-            article for article in reviewed_articles
-            if article.get("delivery_decision") == "include"
-            and _is_github_topic_article(article)
-        ],
-        limit=6,
-        diversify_by_type=False,
-    )
-    facebook_topic_candidates = _select_diverse_candidates(
-        [
-            article for article in reviewed_articles
-            if article.get("delivery_decision") == "include"
-            and _is_facebook_topic_article(article)
-        ],
-        limit=6,
-        diversify_by_type=False,
     )
     _apply_grok_final_editor_pass(
         telegram_candidates,
@@ -1087,15 +969,11 @@ def delivery_judge_node(state: dict[str, Any]) -> dict[str, Any]:
     )
 
     logger.info(
-        "✅ Delivery judge xong: main=%d include | github=%d include | facebook=%d include | total=%d",
+        "✅ Delivery judge xong: main=%d include | total=%d",
         len(telegram_candidates),
-        len(github_topic_candidates),
-        len(facebook_topic_candidates),
         len(reviewed_articles),
     )
     return {
         "final_articles": reviewed_articles,
         "telegram_candidates": telegram_candidates,
-        "github_topic_candidates": github_topic_candidates,
-        "facebook_topic_candidates": facebook_topic_candidates,
     }

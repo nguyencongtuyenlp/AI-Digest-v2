@@ -49,7 +49,6 @@ flowchart LR
     D1["UI Preview"]
     D2["Telegram Main"]
     D3["Telegram GitHub Topic"]
-    D4["Telegram Facebook Topic"]
   end
 
   Inputs --> Orchestration
@@ -71,7 +70,7 @@ Hệ thống có 3 điểm vào chính:
 - `ui_server.py`
   Chạy local control panel để preview và approve.
 - `github_agent_brief.py`
-  Chạy lane GitHub riêng nếu cần thao tác độc lập.
+  Chạy preview hoặc publish chỉ còn xoay quanh main brief.
 
 Ngoài ra còn có:
 
@@ -143,7 +142,7 @@ State trung tâm là `DigestState`, chứa các nhóm dữ liệu:
 - dữ liệu sau làm sạch: `new_articles`
 - feedback context
 - kết quả scoring: `scored_articles`, `top_articles`, `low_score_articles`
-- dữ liệu delivery: `final_articles`, `telegram_candidates`, `github_topic_candidates`, `facebook_topic_candidates`
+- dữ liệu delivery: `final_articles`, `telegram_candidates`
 - output publish: `notion_pages`, `telegram_messages`
 - artefact quản trị: `run_report_path`, `run_health`, `publish_ready`, `snapshot paths`
 
@@ -284,12 +283,9 @@ Mục tiêu:
 - chấm điểm theo độ quan trọng với startup/operator
 - quyết định bài nào cần deep analysis
 
-6 nhóm tin hiện dùng:
+3 nhóm tin hiện dùng:
 
-- `Research`
 - `Product`
-- `Business`
-- `Policy & Ethics`
 - `Society & Culture`
 - `Practical`
 
@@ -344,14 +340,11 @@ File chính:
 
 Đây là lớp quyết định `bài nào xứng đáng được gửi`.
 
-Hệ thống hiện có 3 lane đầu ra:
+Hệ thống hiện có 1 lane đầu ra:
 
 - `telegram_candidates`
   main brief
-- `github_topic_candidates`
   repo/release/tool lane riêng
-- `facebook_topic_candidates`
-  Facebook/social lane riêng
 
 Logic judge gồm:
 
@@ -440,7 +433,7 @@ File chính:
 Nhiệm vụ:
 
 - dựng Telegram messages từ candidate đã qua judge
-- giữ tách biệt 3 lane `main / GitHub / Facebook`
+- giữ main brief gọn, đủ dày và không bị lane phụ làm loãng
 - có thể dùng history fallback khi batch mỏng
 - optional Grok news copy để polish blurb
 
@@ -465,8 +458,6 @@ File chính:
 Đầu ra:
 
 - main thread qua `TELEGRAM_THREAD_ID`
-- GitHub topic qua `TELEGRAM_GITHUB_THREAD_ID`
-- Facebook topic qua `TELEGRAM_FACEBOOK_THREAD_ID`
 
 Đặc điểm:
 

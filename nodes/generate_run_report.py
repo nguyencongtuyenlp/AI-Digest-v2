@@ -20,8 +20,11 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from artifact_retention import build_artifact_cleanup_markdown, cleanup_runtime_artifacts
+from db import get_history
+from executive_intelligence import build_executive_intelligence_bundle
 from run_health import assess_run_health
 from source_history import batch_source_history_rows, load_source_history
+from weekly_memo import build_weekly_memo, write_weekly_memo
 from xai_grok import (
     grok_source_gap_enabled,
     grok_source_gap_max_articles,
@@ -130,23 +133,20 @@ def _build_run_report_markdown(state: dict[str, Any], generated_at: datetime) ->
     final_articles = list(state.get("final_articles", []))
     grok_scout_count = int(state.get("grok_scout_count", 0) or 0)
     telegram_candidates = list(state.get("telegram_candidates", []))
-    github_topic_candidates = list(state.get("github_topic_candidates", []))
-    facebook_topic_candidates = list(state.get("facebook_topic_candidates", []))
-    facebook_discovered_sources = list(state.get("facebook_discovered_sources", []) or [])
-    facebook_auto_active_sources = list(state.get("facebook_auto_active_sources", []) or [])
-    facebook_candidate_sources = list(state.get("facebook_candidate_sources", []) or [])
     notion_pages = list(state.get("notion_pages", []))
     summary_mode = str(state.get("summary_mode", "") or "")
     summary_warnings = list(state.get("summary_warnings", []) or [])
     telegram_sent = bool(state.get("telegram_sent", False))
-    github_topic_sent = bool(state.get("github_topic_sent", False))
-    facebook_topic_sent = bool(state.get("facebook_topic_sent", False))
     run_mode = str(state.get("run_mode", "") or "unknown")
     run_profile = str(state.get("run_profile", "") or run_mode)
     runtime_config = dict(state.get("runtime_config", {}) or {})
     feedback_summary_text = str(state.get("feedback_summary_text", "") or "")
     feedback_label_counts = dict(state.get("feedback_label_counts", {}) or {})
+    feedback_preference_profile = dict(state.get("feedback_preference_profile", {}) or {})
     feedback_sync = dict(state.get("feedback_sync", {}) or {})
+    weekly_memo_path = str(state.get("weekly_memo_path", "") or "")
+    watchlist_report_path = str(state.get("watchlist_report_path", "") or "")
+    topic_pages = list(state.get("topic_pages", []) or [])
     grok_source_gap_suggestions = list(state.get("grok_source_gap_suggestions", []) or [])
     grok_source_gap_batch_note = str(state.get("grok_source_gap_batch_note", "") or "")
     gather_snapshot_path = str(state.get("gather_snapshot_path", "") or "")
@@ -170,15 +170,8 @@ def _build_run_report_markdown(state: dict[str, Any], generated_at: datetime) ->
         f"- Final articles: {len(final_articles)}",
         f"- Grok scout articles: {grok_scout_count}",
         f"- Telegram candidates: {len(telegram_candidates)}",
-        f"- GitHub topic candidates: {len(github_topic_candidates)}",
-        f"- Facebook topic candidates: {len(facebook_topic_candidates)}",
-        f"- Facebook discovered sources: {len(facebook_discovered_sources)}",
-        f"- Facebook auto-active sources: {len(facebook_auto_active_sources)}",
-        f"- Facebook candidate sources: {len(facebook_candidate_sources)}",
         f"- Notion pages: {len(notion_pages)}",
         f"- Telegram sent: {'yes' if telegram_sent else 'no'}",
-        f"- GitHub topic sent: {'yes' if github_topic_sent else 'no'}",
-        f"- Facebook topic sent: {'yes' if facebook_topic_sent else 'no'}",
         f"- Summary mode: {summary_mode or 'unknown'}",
         f"- Health status: {run_health.get('status', 'unknown')}",
         f"- Publish ready: {'yes' if run_health.get('publish_ready') else 'no'}",
@@ -227,9 +220,28 @@ def _build_run_report_markdown(state: dict[str, Any], generated_at: datetime) ->
             lines.append(f"- {key}: {value}")
     else:
         lines.append("- Chưa có feedback labels.")
+    if feedback_preference_profile:
+        lines.append(
+            "- Preference profile: "
+            + ", ".join(f"{key}={value}" for key, value in sorted(feedback_preference_profile.items()))
+        )
     lines.append("")
     lines.append(feedback_summary_text or "Chưa có feedback mới từ team.")
     lines.append("")
+
+    if weekly_memo_path or watchlist_report_path or topic_pages:
+        lines.extend(["## Executive Intelligence", ""])
+        if weekly_memo_path:
+            lines.append(f"- Weekly memo: {weekly_memo_path}")
+        if watchlist_report_path:
+            lines.append(f"- Watchlist report: {watchlist_report_path}")
+        if topic_pages:
+            lines.append(f"- Topic pages/artifacts: {len(topic_pages)}")
+            for page in topic_pages[:8]:
+                label = str(page.get("topic", page.get("path", "")) or "").strip() or "(unknown)"
+                ref = str(page.get("url", page.get("path", "")) or "").strip() or "(missing)"
+                lines.append(f"- {label}: {ref}")
+        lines.append("")
 
     lines.extend(_counter_markdown("Raw By Source", _count_by(raw_articles, "source")))
     lines.extend(_counter_markdown("Raw By Source Kind", _count_by(raw_articles, "source_kind")))
@@ -238,8 +250,6 @@ def _build_run_report_markdown(state: dict[str, Any], generated_at: datetime) ->
     lines.extend(_counter_markdown("Scored By Type", _count_by(scored_articles, "primary_type")))
     lines.extend(_counter_markdown("Scored By Tag", _count_tags(scored_articles)))
     lines.extend(_counter_markdown("Telegram Candidates By Type", _count_by(telegram_candidates, "primary_type")))
-    lines.extend(_counter_markdown("GitHub Topic Candidates By Type", _count_by(github_topic_candidates, "primary_type")))
-    lines.extend(_counter_markdown("Facebook Topic Candidates By Type", _count_by(facebook_topic_candidates, "primary_type")))
     lines.extend(_counter_markdown("Delivery Skip Reasons", _count_delivery_skip_reasons(final_articles)))
     lines.extend(_counter_markdown("Facebook Sort Mode Breakdown", _count_facebook_sort_modes(raw_articles)))
     lines.extend(_counter_markdown("Facebook Skip Reasons", _count_facebook_skip_reasons(final_articles)))
@@ -273,41 +283,6 @@ def _build_run_report_markdown(state: dict[str, Any], generated_at: datetime) ->
                 f"status={source.get('status', 'neutral')} | "
                 f"noise_rate={source.get('noise_rate', 0.0)} | "
                 f"penalty={source.get('penalty', 0)}"
-            )
-    lines.append("")
-
-    lines.extend(["## Facebook Discovery", ""])
-    lines.append(f"- Discovered sources: {len(facebook_discovered_sources)}")
-    lines.append(f"- Auto-active sources: {len(facebook_auto_active_sources)}")
-    lines.append(f"- Candidate sources: {len(facebook_candidate_sources)}")
-    if facebook_auto_active_sources:
-        lines.append("")
-        lines.append("### Auto-active")
-        lines.append("")
-        for source in facebook_auto_active_sources[:12]:
-            lines.append(
-                "- "
-                f"[{str(source.get('status', 'auto_active')).upper()}] "
-                f"{source.get('label', 'Unknown')} | "
-                f"type={source.get('source_type', 'unknown')} | "
-                f"origin={source.get('discovery_origin', 'unknown')} | "
-                f"ai_score={source.get('ai_source_score', 0)} | "
-                f"url={source.get('url', '')}"
-            )
-    else:
-        lines.append("- Chưa có source Facebook auto-active.")
-    if facebook_candidate_sources:
-        lines.append("")
-        lines.append("### Candidates")
-        lines.append("")
-        for source in facebook_candidate_sources[:12]:
-            lines.append(
-                "- "
-                f"{source.get('label', 'Unknown')} | "
-                f"type={source.get('source_type', 'unknown')} | "
-                f"origin={source.get('discovery_origin', 'unknown')} | "
-                f"ai_score={source.get('ai_source_score', 0)} | "
-                f"url={source.get('url', '')}"
             )
     lines.append("")
 
@@ -409,37 +384,6 @@ def _build_run_report_markdown(state: dict[str, Any], generated_at: datetime) ->
         lines.append("- Không có bài deep analysis.")
     lines.append("")
 
-    lines.extend(["## GitHub Topic Candidates", ""])
-    if github_topic_candidates:
-        for article in github_topic_candidates:
-            lines.append(
-                "- "
-                f"[{article.get('primary_type', '?')}] "
-                f"{article.get('title', 'N/A')} | "
-                f"score={article.get('total_score', 0)} | "
-                f"delivery={article.get('delivery_score', 0)} | "
-                f"repo={article.get('github_full_name', '') or article.get('source', '')}"
-            )
-    else:
-        lines.append("- Không có bài nào được chọn cho topic GitHub.")
-    lines.append("")
-
-    lines.extend(["## Facebook Topic Candidates", ""])
-    if facebook_topic_candidates:
-        for article in facebook_topic_candidates:
-            lines.append(
-                "- "
-                f"[{article.get('primary_type', '?')}] "
-                f"{article.get('title', 'N/A')} | "
-                f"score={article.get('total_score', 0)} | "
-                f"delivery={article.get('delivery_score', 0)} | "
-                f"source={article.get('source_domain', article.get('source', ''))} | "
-                f"why={_compact_reason_value(article.get('delivery_rationale', ''))}"
-            )
-    else:
-        lines.append("- Không có bài nào được chọn cho topic Facebook.")
-    lines.append("")
-
     lines.extend(["## Why Skipped", ""])
     if low_score_articles:
         for article in low_score_articles[:10]:
@@ -480,6 +424,44 @@ def generate_run_report_node(state: dict[str, Any]) -> dict[str, Any]:
     enriched_state = dict(state)
     enriched_state["run_health"] = run_health
     enriched_state["publish_ready"] = bool(run_health.get("publish_ready", False))
+    combined_history: list[dict[str, Any]] = []
+    seen_urls: set[str] = set()
+    for article in list(state.get("final_articles", []) or []) + list(state.get("scored_articles", []) or []):
+        if not isinstance(article, dict):
+            continue
+        url = str(article.get("url", "") or "").strip()
+        if url and url in seen_urls:
+            continue
+        if url:
+            seen_urls.add(url)
+        combined_history.append(article)
+    for article in get_history(days=14, limit=120):
+        if not isinstance(article, dict):
+            continue
+        url = str(article.get("url", "") or "").strip()
+        if url and url in seen_urls:
+            continue
+        if url:
+            seen_urls.add(url)
+        combined_history.append(article)
+
+    try:
+        weekly_memo_markdown = build_weekly_memo(combined_history, days=7)
+        weekly_memo_path = write_weekly_memo(weekly_memo_markdown)
+        enriched_state["weekly_memo_path"] = str(weekly_memo_path)
+    except Exception as exc:
+        logger.warning("Weekly memo generation skipped: %s", exc)
+        enriched_state["weekly_memo_path"] = ""
+
+    try:
+        intelligence_bundle = build_executive_intelligence_bundle(combined_history, days=14)
+        enriched_state["watchlist_report_path"] = str(intelligence_bundle.get("watchlist_path", "") or "")
+        if not enriched_state.get("topic_pages"):
+            enriched_state["topic_pages"] = list(intelligence_bundle.get("topic_page_artifacts", []) or [])
+    except Exception as exc:
+        logger.warning("Executive intelligence bundle skipped: %s", exc)
+        enriched_state["watchlist_report_path"] = ""
+
     runtime_config = dict(state.get("runtime_config", {}) or {})
     if grok_source_gap_enabled(runtime_config):
         source_gap_result = suggest_source_gap_expansion(
@@ -499,6 +481,8 @@ def generate_run_report_node(state: dict[str, Any]) -> dict[str, Any]:
             report_path,
             str(enriched_state.get("gather_snapshot_path", "") or ""),
             str(enriched_state.get("scored_snapshot_path", "") or ""),
+            str(enriched_state.get("weekly_memo_path", "") or ""),
+            str(enriched_state.get("watchlist_report_path", "") or ""),
         ],
     )
     cleanup_lines = build_artifact_cleanup_markdown(artifact_cleanup)
@@ -508,6 +492,9 @@ def generate_run_report_node(state: dict[str, Any]) -> dict[str, Any]:
     logger.info("🧾 Run report written: %s", report_path)
     return {
         "run_report_path": str(report_path),
+        "weekly_memo_path": str(enriched_state.get("weekly_memo_path", "") or ""),
+        "watchlist_report_path": str(enriched_state.get("watchlist_report_path", "") or ""),
+        "topic_pages": list(enriched_state.get("topic_pages", []) or []),
         "run_health": run_health,
         "publish_ready": bool(run_health.get("publish_ready", False)),
         "grok_source_gap_suggestions": list(enriched_state.get("grok_source_gap_suggestions", []) or []),

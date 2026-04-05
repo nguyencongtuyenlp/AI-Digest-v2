@@ -23,6 +23,7 @@ from typing import Any
 
 from runtime_presets import apply_runtime_preset
 from mlx_runner import clear_runtime_mlx_model_path, set_runtime_mlx_model_path
+from run_health import collect_source_health, notify_source_health_if_needed
 
 logger = logging.getLogger(__name__)
 
@@ -98,8 +99,6 @@ def _get_pipeline_graph():
 
 def summarize_result(result: dict[str, Any], elapsed_seconds: float) -> dict[str, Any]:
     telegram_messages = [msg for msg in result.get("telegram_messages", []) if str(msg or "").strip()]
-    github_topic_messages = [msg for msg in result.get("github_topic_messages", []) if str(msg or "").strip()]
-    facebook_topic_messages = [msg for msg in result.get("facebook_topic_messages", []) if str(msg or "").strip()]
     published_notion_pages = [
         page for page in result.get("notion_pages", [])
         if isinstance(page, dict) and str(page.get("url", "") or "").strip()
@@ -114,27 +113,25 @@ def summarize_result(result: dict[str, Any], elapsed_seconds: float) -> dict[str
         "top_count": len(result.get("top_articles", [])),
         "final_count": len(result.get("final_articles", [])),
         "telegram_candidate_count": len(result.get("telegram_candidates", [])),
-        "github_topic_candidate_count": len(result.get("github_topic_candidates", [])),
-        "facebook_topic_candidate_count": len(result.get("facebook_topic_candidates", [])),
         "notion_count": len(published_notion_pages),
         "telegram_sent": bool(result.get("telegram_sent", False)),
-        "github_topic_sent": bool(result.get("github_topic_sent", False)),
-        "facebook_topic_sent": bool(result.get("facebook_topic_sent", False)),
         "summary_mode": result.get("summary_mode", "unknown"),
         "summary_warnings": list(result.get("summary_warnings", []) or []),
         "run_report_path": result.get("run_report_path", ""),
         "telegram_messages": telegram_messages,
-        "github_topic_messages": github_topic_messages,
-        "facebook_topic_messages": facebook_topic_messages,
         "run_profile": result.get("run_profile", ""),
         "runtime_config": dict(result.get("runtime_config", {}) or {}),
         "feedback_summary_text": str(result.get("feedback_summary_text", "") or ""),
         "feedback_label_counts": dict(result.get("feedback_label_counts", {}) or {}),
+        "feedback_preference_profile": dict(result.get("feedback_preference_profile", {}) or {}),
         "feedback_sync": dict(result.get("feedback_sync", {}) or {}),
         "run_health": dict(result.get("run_health", {}) or {}),
         "publish_ready": bool(result.get("publish_ready", False)),
         "gather_snapshot_path": str(result.get("gather_snapshot_path", "") or ""),
         "scored_snapshot_path": str(result.get("scored_snapshot_path", "") or ""),
+        "weekly_memo_path": str(result.get("weekly_memo_path", "") or ""),
+        "watchlist_report_path": str(result.get("watchlist_report_path", "") or ""),
+        "topic_pages": list(result.get("topic_pages", []) or []),
         "artifact_cleanup": dict(result.get("artifact_cleanup", {}) or {}),
     }
 
@@ -153,6 +150,12 @@ def run_pipeline(
     with _runtime_model_override(initial_state.get("runtime_config", {})):
         with _pipeline_run_lock():
             start = datetime.now(timezone.utc)
+            source_health = collect_source_health()
+            initial_state["source_health"] = source_health
+            initial_state["source_health_alert_sent"] = notify_source_health_if_needed(
+                source_health,
+                run_mode=initial_state.get("run_mode", "publish"),
+            )
             app = _get_pipeline_graph()
             result = app.invoke(initial_state)
             elapsed = (datetime.now(timezone.utc) - start).total_seconds()

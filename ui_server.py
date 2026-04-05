@@ -4,7 +4,7 @@ ui_server.py — Local control panel cho Daily Digest Agent.
 
 Phiên bản này ưu tiên 3 lớp UX quan trọng:
 - Approve from preview
-- xem trước đúng output Telegram theo 3 lane
+- xem trước đúng output Telegram của main brief
 - giữ review đơn giản, không biến UI thành nơi chỉnh threshold/preset
 """
 
@@ -1208,7 +1208,7 @@ HTML_PAGE = """<!doctype html>
           <div class="status-pill"><span id="status-dot" class="dot"></span><span id="status-text">Idle</span></div>
           <h1>Founder-grade digest preview workspace</h1>
           <p class="hero-copy">
-            Màn này chỉ làm một việc: cho bạn xem trước đầu ra sẽ lên Telegram ở các topic khác nhau.
+            Màn này chỉ làm một việc: cho bạn xem trước đầu ra sẽ lên Telegram ở bản tin chính.
             `Run Preview` là baseline bám production; `Grok Smart` là nhánh thử nghiệm mở rộng Grok để so chất lượng.
             UI không còn là nơi chỉnh tham số thủ công.
           </p>
@@ -1220,8 +1220,6 @@ HTML_PAGE = """<!doctype html>
             <span class="meta-chip">Health <span id="health-status">-</span></span>
             <span class="meta-chip">Publish ready <span id="publish-ready">-</span></span>
             <span class="meta-chip">Main ready <span id="main-candidate-chip">0</span></span>
-            <span class="meta-chip">GitHub ready <span id="github-candidate-chip">0</span></span>
-            <span class="meta-chip">Facebook ready <span id="facebook-candidate-chip">0</span></span>
             <span class="meta-chip">Notion pages <span id="notion-count">0</span></span>
             <span class="meta-chip">Telegram sent <span id="telegram-sent">no</span></span>
             <span id="preview-state-pill" class="tiny-chip">preview state: idle</span>
@@ -1244,7 +1242,7 @@ HTML_PAGE = """<!doctype html>
           <div id="elapsed" class="side-number">0.0s</div>
           <p class="side-copy">
             Baseline preview dùng cùng backbone production và chưa tạo side effect ra ngoài.
-            Nếu muốn thử batch “gắt” hơn, dùng Grok Smart rồi so trực tiếp 3 lane Telegram ở bên dưới.
+            Nếu muốn thử batch “gắt” hơn, dùng Grok Smart rồi so trực tiếp output main brief ở bên dưới.
           </p>
           <div class="guide-list" style="margin-top: 18px;">
             <div class="guide-item" style="background: rgba(255,255,255,0.06); border-color: rgba(255,255,255,0.08); color: rgba(231, 238, 247, 0.74);">
@@ -1263,8 +1261,6 @@ HTML_PAGE = """<!doctype html>
         <div class="stats-card"><div class="label">Raw gathered</div><div class="metric-value" id="raw-count">0</div><div class="metric-copy">Tổng số tín hiệu kéo về từ mọi nguồn.</div></div>
         <div class="stats-card"><div class="label">Scored</div><div class="metric-value" id="scored-count">0</div><div class="metric-copy">Số bài đã được classify và chấm điểm.</div></div>
         <div class="stats-card"><div class="label">Main topic</div><div class="metric-value" id="tg-candidate-count">0</div><div class="metric-copy">Số bài đủ chuẩn cho bản tin chính.</div></div>
-        <div class="stats-card"><div class="label">GitHub topic</div><div class="metric-value" id="github-candidate-count">0</div><div class="metric-copy">Repo/release đủ chuẩn cho topic GitHub.</div></div>
-        <div class="stats-card"><div class="label">Facebook topic</div><div class="metric-value" id="facebook-candidate-count">0</div><div class="metric-copy">Post community đủ chuẩn cho Facebook News.</div></div>
         <div class="stats-card"><div class="label">Notion pages</div><div class="metric-value" id="notion-count-card">0</div><div class="metric-copy">Số page được tạo hoặc reuse trong batch này.</div></div>
       </section>
 
@@ -1275,13 +1271,11 @@ HTML_PAGE = """<!doctype html>
               <div class="telegram-avatar">DD</div>
               <div>
                 <h2>Telegram Output Preview</h2>
-                <div class="telegram-subtitle">Xem trước đúng 3 lane: main brief, GitHub repo, Facebook News</div>
+                <div class="telegram-subtitle">Xem trước đúng output Telegram của main brief hiện tại</div>
               </div>
             </div>
             <div class="telegram-actions">
               <span>Main</span>
-              <span>GitHub</span>
-              <span>Facebook</span>
             </div>
           </div>
           <div class="lane-stack">
@@ -1294,28 +1288,6 @@ HTML_PAGE = """<!doctype html>
                 <span id="main-topic-meta" class="topic-meta">0 messages</span>
               </div>
               <div id="messages-main" class="topic-thread"></div>
-            </section>
-
-            <section class="topic-card">
-              <div class="topic-head">
-                <div>
-                  <div class="topic-title">GitHub Repo Digest</div>
-                  <div class="topic-copy">Lane repo/release, không chen vào bản tin chính</div>
-                </div>
-                <span id="github-topic-meta" class="topic-meta">0 messages</span>
-              </div>
-              <div id="messages-github" class="topic-thread"></div>
-            </section>
-
-            <section class="topic-card">
-              <div class="topic-head">
-                <div>
-                  <div class="topic-title">Facebook News</div>
-                  <div class="topic-copy">Lane community riêng cho group/page/profile Facebook</div>
-                </div>
-                <span id="facebook-topic-meta" class="topic-meta">0 messages</span>
-              </div>
-              <div id="messages-facebook" class="topic-thread"></div>
             </section>
           </div>
         </section>
@@ -1419,8 +1391,8 @@ HTML_PAGE = """<!doctype html>
               Run Preview dùng cùng source mix, scoring, routing và editorial logic như publish thật; khác biệt chính là chưa tạo side effect ra ngoài.
             </div>
             <div class="guide-item">
-              <strong>3 lane tách biệt</strong>
-              Main brief, GitHub Repo Digest và Facebook News được xem riêng, để bạn nhìn đúng việc bài nào đang rơi vào lane nào thay vì bị trộn chung.
+              <strong>Main brief là output duy nhất</strong>
+              Preview này phản chiếu đúng bản tin chính sẽ đi ra Telegram, không còn lane GitHub riêng chen vào nữa.
             </div>
             <div class="guide-item">
               <strong>Terminal realtime vẫn là nơi chạy ops</strong>
@@ -1667,8 +1639,6 @@ HTML_PAGE = """<!doctype html>
       document.getElementById('raw-count').textContent = result.raw_count || 0;
       document.getElementById('scored-count').textContent = result.scored_count || 0;
       document.getElementById('tg-candidate-count').textContent = result.telegram_candidate_count || 0;
-      document.getElementById('github-candidate-count').textContent = result.github_topic_candidate_count || 0;
-      document.getElementById('facebook-candidate-count').textContent = result.facebook_topic_candidate_count || 0;
       document.getElementById('notion-count-card').textContent = result.notion_count || 0;
       document.getElementById('run-mode').textContent = result.run_mode || data.last_mode || '-';
       document.getElementById('run-profile').textContent = result.run_profile || data.last_profile || '-';
@@ -1676,8 +1646,6 @@ HTML_PAGE = """<!doctype html>
       document.getElementById('health-status').textContent = (result.run_health || {}).status || '-';
       document.getElementById('publish-ready').textContent = result.publish_ready ? 'yes' : 'no';
       document.getElementById('main-candidate-chip').textContent = result.telegram_candidate_count || 0;
-      document.getElementById('github-candidate-chip').textContent = result.github_topic_candidate_count || 0;
-      document.getElementById('facebook-candidate-chip').textContent = result.facebook_topic_candidate_count || 0;
       document.getElementById('notion-count').textContent = result.notion_count || 0;
       document.getElementById('telegram-sent').textContent = result.telegram_sent ? 'yes' : 'no';
       document.getElementById('run-health').textContent = JSON.stringify(result.run_health || {}, null, 2);
@@ -1695,20 +1663,6 @@ HTML_PAGE = """<!doctype html>
         result.telegram_messages || [],
         'Chưa có bản tin chính nào. Hãy chạy preview để xem batch hiện tại.',
         'Main'
-      );
-      renderLaneMessages(
-        'messages-github',
-        'github-topic-meta',
-        result.github_topic_messages || [],
-        'Chưa có message nào cho GitHub Repo Digest ở batch này.',
-        'GitHub'
-      );
-      renderLaneMessages(
-        'messages-facebook',
-        'facebook-topic-meta',
-        result.facebook_topic_messages || [],
-        'Chưa có message nào cho Facebook News ở batch này.',
-        'Facebook'
       );
       renderWorkspace(data.preview_articles || [], data.preview_publish_state || 'preview only');
 
