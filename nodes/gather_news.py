@@ -57,6 +57,7 @@ from source_history import (
     filter_discovered_sources_by_history,
     load_source_history,
 )
+from nodes.adapters.hackernews_adapter import fetch_hackernews_top_stories
 from source_adapters import facebook_adapter as _facebook_adapter
 from source_adapters.github_adapter import fetch_github_articles as _fetch_github_articles_impl
 from source_adapters.grok_scout_adapter import (
@@ -85,10 +86,12 @@ logger = logging.getLogger(__name__)
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 SAFE_DDGS_TEXT_BACKEND = os.getenv("DDGS_TEXT_BACKEND", "duckduckgo").strip().lower() or "duckduckgo"
+MAX_GITHUB_RATIO = 0.30
 REQUEST_HEADERS = {
     "User-Agent": "AvalookDigestBot/1.0 (+https://avalook.local)",
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
 }
+FACEBOOK_SESSION_MAX_AGE_DAYS = 7.0
 
 FOUNDER_GRADE_SIGNAL_KEYWORDS = (
     "ai",
@@ -813,7 +816,7 @@ def _build_social_signal_articles() -> list[dict[str, Any]]:
                 "social_platform": platform,
                 "social_author": author,
                 "social_group": group_name,
-                "delivery_lane_hint": "facebook_topic" if platform == "facebook" or (url and _is_social_signal_url(url)) else "",
+                "delivery_lane_hint": "",
                 "community_reactions": comments,
                 "source_kind": "community",
                 "source_priority": 74,
@@ -884,6 +887,50 @@ def _facebook_profile_dir() -> Path:
 
 def _facebook_storage_state_file() -> Path:
     return _project_path_from_env(FACEBOOK_STORAGE_STATE_DEFAULT_FILE, "FACEBOOK_STORAGE_STATE_FILE")
+
+
+def _file_age_days(path: Path) -> float | None:
+    try:
+        modified = datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc)
+    except OSError:
+        return None
+    return max(0.0, (datetime.now(timezone.utc) - modified).total_seconds() / 86400.0)
+
+
+def _facebook_session_needs_refresh() -> bool:
+    storage_state = _facebook_storage_state_file()
+    age_days = _file_age_days(storage_state)
+    if not storage_state.exists():
+        return True
+    return age_days is None or age_days > FACEBOOK_SESSION_MAX_AGE_DAYS
+
+
+def _send_telegram_alert(text: str, *, thread_env: str = "TELEGRAM_THREAD_ID") -> bool:
+    bot_token = str(os.getenv("TELEGRAM_BOT_TOKEN", "") or "").strip()
+    chat_id = str(os.getenv("TELEGRAM_CHAT_ID", "") or "").strip()
+    if not bot_token or not chat_id or not str(text or "").strip():
+        return False
+
+    payload: dict[str, Any] = {
+        "chat_id": chat_id,
+        "text": text,
+        "disable_web_page_preview": True,
+    }
+    thread_value = str(os.getenv(thread_env, "") or "").strip()
+    if thread_value:
+        with suppress(ValueError):
+            payload["message_thread_id"] = int(thread_value)
+
+    try:
+        response = requests.post(
+            f"https://api.telegram.org/bot{bot_token}/sendMessage",
+            json=payload,
+            timeout=10,
+        )
+        return response.status_code == 200
+    except Exception as exc:
+        logger.warning("Telegram alert send failed: %s", exc)
+        return False
 
 
 def _facebook_chrome_executable() -> str:
@@ -1211,73 +1258,157 @@ def _is_founder_grade_candidate(title: str, snippet: str = "", url: str = "", so
 
 def _fetch_hacker_news(limit: int = 10) -> list[dict[str, Any]]:
     """
-    Lấy từ HN public API.
-    Đây là nguồn cộng đồng chất lượng tốt hơn search chay, và không cần API key.
+    Wrapper giữ backward compatibility cho gather/tests, nhưng phần fetch thật
+    đã được tách sang nodes/adapters/hackernews_adapter.py.
     """
-    base_url = "https://hacker-news.firebaseio.com/v0"
     collected: list[dict[str, Any]] = []
-
-    try:
-        response = requests.get(f"{base_url}/topstories.json", headers=REQUEST_HEADERS, timeout=20)
-        response.raise_for_status()
-        story_ids = response.json()[:60]
-    except Exception as exc:
-        logger.warning("Hacker News fetch failed: %s", exc)
-        return []
-
-    for story_id in story_ids:
-        try:
-            item_resp = requests.get(f"{base_url}/item/{story_id}.json", headers=REQUEST_HEADERS, timeout=20)
-            item_resp.raise_for_status()
-            item = item_resp.json() or {}
-        except Exception:
-            continue
-
+    for item in fetch_hackernews_top_stories(limit=limit):
         title = str(item.get("title", "") or "")
-        url = str(item.get("url", "") or "")
-        if not title or not _is_ai_relevant_text(f"{title} {url}"):
+        story_url = str(item.get("url", "") or "")
+        story_text = str(item.get("content", "") or "")
+        if not title or not _is_ai_relevant_text(f"{title} {story_url} {story_text}"):
             continue
-
-        hn_url = f"https://news.ycombinator.com/item?id={story_id}"
         collected.append(
             {
                 "title": title,
-                "url": url or hn_url,
-                "source": "Hacker News API",
-                "snippet": f"HN score={item.get('score', 0)} comments={item.get('descendants', 0)}",
-                "content": item.get("text", "") or "",
-                "published": datetime.fromtimestamp(int(item.get("time", 0) or 0), tz=timezone.utc).isoformat()
-                if item.get("time")
-                else "",
-                "community_hint": hn_url,
+                "url": story_url,
+                "source": str(item.get("source", "Hacker News Algolia") or "Hacker News Algolia"),
+                "snippet": story_text[:500],
+                "content": story_text,
+                "published_at": str(item.get("published_at", "") or ""),
+                "published": str(item.get("published_at", "") or ""),
+                "community_hint": str(item.get("community_hint", story_url) or story_url),
                 "fetched_at": datetime.now(timezone.utc).isoformat(),
-                "source_kind": "community",
+                "source_kind": str(item.get("source_kind", "api") or "api"),
                 "source_priority": 74,
-                "community_signal_strength": min(
-                    5,
-                    3
-                    + (1 if int(item.get("score", 0) or 0) >= 50 else 0)
-                    + (1 if int(item.get("descendants", 0) or 0) >= 25 else 0),
-                ),
+                "score": int(item.get("score", 0) or 0),
+                "community_signal_strength": int(item.get("community_signal_strength", 4) or 0),
+                "hn_points": int(item.get("hn_points", 0) or 0),
+                "hn_num_comments": int(item.get("hn_num_comments", 0) or 0),
             }
         )
-        if len(collected) >= limit:
-            break
-
     return collected
+
+
+def _is_github_article(article: dict[str, Any]) -> bool:
+    url = str(article.get("url", "") or "").strip().lower()
+    source_domain = str(article.get("source_domain", "") or "").strip().lower()
+    source_kind = str(article.get("source_kind", "") or "").strip().lower()
+    return "github.com" in url or source_domain == "github.com" or source_kind == "github"
+
+
+def _github_retention_sort_key(article: dict[str, Any]) -> tuple[int, int, int]:
+    return (
+        int(article.get("community_signal_strength", 0) or 0),
+        int(article.get("github_stars", 0) or 0),
+        int(article.get("source_priority", 0) or 0),
+    )
+
+
+def _cap_github_article_ratio(raw_articles: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    github_articles = [article for article in raw_articles if _is_github_article(article)]
+    non_github_articles = [article for article in raw_articles if not _is_github_article(article)]
+    if not github_articles:
+        return raw_articles
+
+    if not non_github_articles:
+        logger.info(
+            "🐙 GitHub ratio cap active: 0 non-GitHub articles, dropping %d GitHub-only articles.",
+            len(github_articles),
+        )
+        return []
+
+    max_github = int(len(non_github_articles) * MAX_GITHUB_RATIO / (1 - MAX_GITHUB_RATIO))
+    if len(github_articles) <= max_github:
+        return raw_articles
+
+    retained_github = sorted(github_articles, key=_github_retention_sort_key, reverse=True)[:max_github]
+    logger.info(
+        "🐙 GitHub ratio cap giữ %d/%d bài GitHub để source mix không vượt %.0f%%.",
+        len(retained_github),
+        len(github_articles),
+        MAX_GITHUB_RATIO * 100,
+    )
+    return non_github_articles + retained_github
 
 
 def _fetch_reddit_posts(limit_per_subreddit: int = 3) -> list[dict[str, Any]]:
     """
-    Lấy community signals trực tiếp từ Reddit thay vì chỉ search vòng ngoài qua DDG.
-    Dùng JSON endpoint công khai; nếu fail thì skip mềm.
+    Lấy community signals trực tiếp từ Reddit.
+    Ưu tiên PRAW nếu có credentials; nếu không thì fallback sang JSON endpoint công khai.
     """
     configured = [item.strip() for item in os.getenv("REDDIT_SUBREDDITS", "").split(",") if item.strip()]
     subreddits = configured or DEFAULT_REDDIT_SUBREDDITS
     articles: list[dict[str, Any]] = []
+    now_ts = datetime.now(timezone.utc).timestamp()
+    cutoff_ts = now_ts - 86400
+    max_items = max(1, min(10, int(limit_per_subreddit or 3) * 5))
+
+    reddit_client_id = str(os.getenv("REDDIT_CLIENT_ID", "") or "").strip()
+    reddit_client_secret = str(os.getenv("REDDIT_CLIENT_SECRET", "") or "").strip()
+    reddit_user_agent = str(os.getenv("REDDIT_USER_AGENT", "ai-digest-bot/1.0") or "ai-digest-bot/1.0").strip()
+
+    def _append_post(*, subreddit: str, title: str, selftext: str, permalink: str, linked_url: str, created_utc: float, score: int, num_comments: int) -> None:
+        if not title or created_utc < cutoff_ts or score <= 100:
+            return
+        if not _is_ai_relevant_text(f"{title} {selftext} {linked_url}"):
+            return
+
+        articles.append(
+            {
+                "title": title,
+                "url": f"https://www.reddit.com{permalink}" if permalink else linked_url,
+                "source": f"Reddit r/{subreddit}",
+                "snippet": selftext[:500],
+                "content": selftext[:4000],
+                "published": datetime.fromtimestamp(float(created_utc), tz=timezone.utc).isoformat(),
+                "community_hint": linked_url,
+                "fetched_at": datetime.now(timezone.utc).isoformat(),
+                "source_kind": "community",
+                "source_priority": 74,
+                "reddit_score": int(score or 0),
+                "reddit_num_comments": int(num_comments or 0),
+                "community_signal_strength": min(
+                    5,
+                    3
+                    + (1 if int(score or 0) >= 250 else 0)
+                    + (1 if int(num_comments or 0) >= 40 else 0),
+                ),
+            }
+        )
+
+    if reddit_client_id and reddit_client_secret:
+        try:
+            import praw
+
+            reddit = praw.Reddit(
+                client_id=reddit_client_id,
+                client_secret=reddit_client_secret,
+                user_agent=reddit_user_agent,
+                check_for_async=False,
+            )
+            for subreddit in subreddits:
+                try:
+                    for post in reddit.subreddit(subreddit).hot(limit=max_items):
+                        _append_post(
+                            subreddit=subreddit,
+                            title=str(getattr(post, "title", "") or ""),
+                            selftext=str(getattr(post, "selftext", "") or ""),
+                            permalink=str(getattr(post, "permalink", "") or ""),
+                            linked_url=str(getattr(post, "url", "") or ""),
+                            created_utc=float(getattr(post, "created_utc", 0) or 0),
+                            score=int(getattr(post, "score", 0) or 0),
+                            num_comments=int(getattr(post, "num_comments", 0) or 0),
+                        )
+                except Exception as exc:
+                    logger.debug("PRAW fetch failed for r/%s: %s", subreddit, exc)
+            if articles:
+                return articles
+        except Exception as exc:
+            logger.debug("PRAW client unavailable, fallback to Reddit JSON: %s", exc)
 
     for subreddit in subreddits:
-        url = f"https://www.reddit.com/r/{subreddit}/new.json?limit={limit_per_subreddit}&raw_json=1"
+        url = f"https://www.reddit.com/r/{subreddit}/hot.json?limit={max_items}&raw_json=1"
         try:
             response = requests.get(url, headers=REQUEST_HEADERS, timeout=20)
             response.raise_for_status()
@@ -1289,33 +1420,15 @@ def _fetch_reddit_posts(limit_per_subreddit: int = 3) -> list[dict[str, Any]]:
         children = payload.get("data", {}).get("children", [])
         for child in children:
             data = child.get("data", {}) or {}
-            title = str(data.get("title", "") or "")
-            selftext = str(data.get("selftext", "") or "")
-            permalink = str(data.get("permalink", "") or "")
-            if not title or not _is_ai_relevant_text(f"{title} {selftext}"):
-                continue
-
-            articles.append(
-                {
-                    "title": title,
-                    "url": f"https://www.reddit.com{permalink}" if permalink else data.get("url", ""),
-                    "source": f"Reddit r/{subreddit}",
-                    "snippet": selftext[:500],
-                    "content": selftext[:4000],
-                    "published": datetime.fromtimestamp(float(data.get("created_utc", 0) or 0), tz=timezone.utc).isoformat()
-                    if data.get("created_utc")
-                    else "",
-                    "community_hint": data.get("url", ""),
-                    "fetched_at": datetime.now(timezone.utc).isoformat(),
-                    "source_kind": "community",
-                    "source_priority": 74,
-                    "community_signal_strength": min(
-                        5,
-                        2
-                        + (1 if int(data.get("score", 0) or 0) >= 20 else 0)
-                        + (1 if int(data.get("num_comments", 0) or 0) >= 10 else 0),
-                    ),
-                }
+            _append_post(
+                subreddit=subreddit,
+                title=str(data.get("title", "") or ""),
+                selftext=str(data.get("selftext", "") or ""),
+                permalink=str(data.get("permalink", "") or ""),
+                linked_url=str(data.get("url", "") or ""),
+                created_utc=float(data.get("created_utc", 0) or 0),
+                score=int(data.get("score", 0) or 0),
+                num_comments=int(data.get("num_comments", 0) or 0),
             )
 
     return articles
@@ -1467,7 +1580,7 @@ def gather_news_node(state: dict[str, Any]) -> dict[str, Any]:
     raw_articles: list[dict[str, Any]] = []
 
     rss_hours = _cfg_int(state, "gather_rss_hours", "GATHER_RSS_HOURS", 72)
-    ddg_max_results = _cfg_int(state, "ddg_max_results_per_query", "DDG_MAX_RESULTS_PER_QUERY", 3)
+    ddg_max_results = _cfg_int(state, "ddg_max_results_per_query", "DDG_MAX_RESULTS_PER_QUERY", 2)
     hn_limit = _cfg_int(state, "hn_max_items", "HN_MAX_ITEMS", 8)
     reddit_limit = _cfg_int(state, "reddit_max_posts_per_subreddit", "REDDIT_MAX_POSTS_PER_SUBREDDIT", 2)
     github_repo_watchlist_limit = _cfg_int(state, "github_max_watchlist_repos", "GITHUB_MAX_WATCHLIST_REPOS", 0)
@@ -1485,16 +1598,22 @@ def gather_news_node(state: dict[str, Any]) -> dict[str, Any]:
     enable_reddit = _cfg_bool(state, "enable_reddit", "REDDIT_ENABLED", True)
     enable_ddg = _cfg_bool(state, "enable_ddg", "ENABLE_DDG", True)
     enable_telegram_channels = _cfg_bool(state, "enable_telegram_channels", "ENABLE_TELEGRAM_CHANNELS", True)
+    facebook_auto_enabled = _facebook_auto_enabled(state)
     facebook_headless = _cfg_bool(state, "facebook_auto_headless", "FACEBOOK_AUTO_HEADLESS", True)
 
     watchlist_seeds = load_watchlist_seeds(PROJECT_ROOT)
     source_history_map = load_source_history()
     facebook_registry = {
         "discovered_sources": [],
-        "auto_active_sources": _load_facebook_auto_targets() if _facebook_auto_enabled(state) else [],
+        "auto_active_sources": [],
         "candidate_sources": [],
     }
-    if _facebook_auto_enabled(state):
+    if facebook_auto_enabled and _facebook_session_needs_refresh():
+        logger.warning("Facebook session missing or older than 7 days; skipping Facebook auto sources.")
+        if str(state.get("run_mode", "publish") or "publish").strip().lower() == "publish":
+            _send_telegram_alert("⚠️ Facebook session cũ hơn 7 ngày. Cần chạy facebook_login_setup.py")
+        facebook_auto_enabled = False
+    if facebook_auto_enabled:
         facebook_registry = _resolve_facebook_source_registry(state, headless=facebook_headless)
         filtered_auto_active, muted_sources = filter_discovered_sources_by_history(
             list(facebook_registry.get("auto_active_sources", []) or []),
@@ -1582,15 +1701,17 @@ def gather_news_node(state: dict[str, Any]) -> dict[str, Any]:
     else:
         logger.info("⏭️ Skip manual social signals theo runtime config.")
 
-    facebook_auto_articles = _build_facebook_auto_articles(
-        state,
-        targets=list(facebook_registry.get("auto_active_sources", []) or []),
-    )
-    if facebook_auto_articles:
-        logger.info("📘 Facebook auto: %d bài", len(facebook_auto_articles))
-        raw_articles.extend(facebook_auto_articles)
-    elif _facebook_auto_enabled(state):
-        logger.info("📘 Facebook auto: 0 bài")
+    facebook_auto_articles: list[dict[str, Any]] = []
+    if facebook_auto_enabled:
+        facebook_auto_articles = _build_facebook_auto_articles(
+            state,
+            targets=list(facebook_registry.get("auto_active_sources", []) or []),
+        )
+        if facebook_auto_articles:
+            logger.info("📘 Facebook auto: %d bài", len(facebook_auto_articles))
+            raw_articles.extend(facebook_auto_articles)
+        else:
+            logger.info("📘 Facebook auto: 0 bài")
 
     if enable_watchlist:
         logger.info("🧭 Loading watchlist seeds …")
@@ -1676,6 +1797,7 @@ def gather_news_node(state: dict[str, Any]) -> dict[str, Any]:
         logger.info("🧠 Grok scout bổ sung: %d bài", len(grok_scout_articles))
         raw_articles.extend(grok_scout_articles)
 
+    raw_articles = _cap_github_article_ratio(raw_articles)
     deduped_raw_articles = _local_deduplicate_articles(raw_articles)
     deduped_raw_articles = annotate_articles_with_source_history(deduped_raw_articles, source_history_map)
     deduped_raw_articles, history_muted_count = _filter_history_muted_discoveries(deduped_raw_articles)
@@ -1688,9 +1810,6 @@ def gather_news_node(state: dict[str, Any]) -> dict[str, Any]:
             "raw_count_after_batch_dedup": len(deduped_raw_articles),
             "grok_scout_count": len(grok_scout_articles) + len(grok_x_scout_articles),
             "history_muted_count": history_muted_count,
-            "facebook_discovered_sources": len(facebook_registry.get("discovered_sources", []) or []),
-            "facebook_auto_active_sources": len(facebook_registry.get("auto_active_sources", []) or []),
-            "facebook_candidate_sources": len(facebook_registry.get("candidate_sources", []) or []),
         },
     )
     logger.info(
@@ -1701,8 +1820,5 @@ def gather_news_node(state: dict[str, Any]) -> dict[str, Any]:
     return {
         "raw_articles": deduped_raw_articles,
         "grok_scout_count": len(grok_scout_articles) + len(grok_x_scout_articles),
-        "facebook_discovered_sources": list(facebook_registry.get("discovered_sources", []) or []),
-        "facebook_auto_active_sources": list(facebook_registry.get("auto_active_sources", []) or []),
-        "facebook_candidate_sources": list(facebook_registry.get("candidate_sources", []) or []),
         "gather_snapshot_path": gather_snapshot_path,
     }
