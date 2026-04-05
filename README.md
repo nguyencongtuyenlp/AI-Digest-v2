@@ -23,6 +23,8 @@ Mặc định hệ ưu tiên local inference qua MLX, không cần API inference
 | Run health | Mỗi run có `health_status` + `publish_ready` để biết batch nào nên publish thật |
 | Eval harness | Có script regression `eval_digest.py` để đo type/tier/delivery trên bộ case cố định |
 | Preview workflow | Chạy preview trong UI rồi `Approve Preview` để publish đúng batch preview đó |
+| Temporal snapshots | Mỗi run có JSON snapshot sau gather và sau scoring để debug source mix / shortlist dễ hơn |
+| Source history | Mỗi publish run học dần nguồn nào hay ra bài tốt, nguồn nào hay ra stale/promo/speculation để giảm noise ở các run sau |
 
 ## Architecture
 
@@ -43,6 +45,11 @@ gather
 → generate_run_report
 → END
 ```
+
+Tài liệu chi tiết:
+
+- [Map Process Theo Scrum](/Users/quangdang/Projects/daily-digest-agent/docs/digest_scrum_process.md)
+- [Cấu Trúc Hệ Thống](/Users/quangdang/Projects/daily-digest-agent/docs/digest_system_structure.md)
 
 Pipeline dùng LangGraph StateGraph và tách 3 lane Telegram:
 - `telegram_messages`: brief công nghệ/AI chính
@@ -86,6 +93,10 @@ Optional:
 - `FACEBOOK_AUTO_TARGETS_FILE`
 - `FACEBOOK_CHROME_PROFILE_DIR`
 - `FACEBOOK_STORAGE_STATE_FILE`
+- `TEMPORAL_SNAPSHOTS_ENABLED`
+- `TEMPORAL_SNAPSHOT_DIR`
+- `DIGEST_ARTIFACT_CLEANUP_ENABLED`
+- `DIGEST_ARTIFACT_ARCHIVE_DIR`
 
 ## Chạy
 
@@ -117,9 +128,19 @@ DIGEST_UI_PORT=8787
 ```
 
 Flow khuyên dùng:
-- `Preview`: chạy full reasoning nhưng chưa publish
+- `Run Preview (Production)`: chạy full reasoning nhưng chưa publish, bám sát logic production
+- `Run Preview (Grok Smart)`: chạy cùng backbone hiện tại nhưng mở rộng lớp Grok để so chất lượng output
+- UI chỉ để xem trước output Telegram theo 3 lane `main / GitHub / Facebook`, không còn chỗ chỉnh threshold/source toggle
 - review kết quả trong UI
 - `Approve Preview`: publish đúng batch preview đó, không regather lại từ đầu
+
+Chạy publish profile `grok_smart` từ terminal:
+
+```bash
+cd /Users/quangdang/Projects/daily-digest-agent
+source .venv/bin/activate
+DIGEST_RUN_PROFILE=grok_smart PYTHONDONTWRITEBYTECODE=1 .venv/bin/python main.py
+```
 
 ### Chạy eval regression
 
@@ -184,6 +205,8 @@ daily-digest-agent/
 ├── graph.py
 ├── db.py
 ├── source_catalog.py
+├── source_history.py
+├── artifact_retention.py
 ├── runtime_presets.py
 ├── editorial_guardrails.py
 ├── digest_formatter.py
@@ -238,6 +261,18 @@ top -l 1 | grep PhysMem
 # Chạy eval và ghi report
 PYTHONDONTWRITEBYTECODE=1 .venv/bin/python eval_digest.py --write-report
 ```
+
+## Artifact Retention
+
+Runtime artifacts không còn nên nằm lẫn trong git history. Mỗi run giờ sẽ tự dọn theo rule an toàn:
+- `reports/daily_digest_run_*.md`: giữ tối đa 12 file gần nhất và không quá 7 ngày trong working tree
+- `reports/eval_digest_*.md`: giữ tối đa 6 file gần nhất và không quá 14 ngày
+- `reports/github_agent_brief_*.md`: giữ tối đa 6 file gần nhất và không quá 14 ngày
+- `reports/temporal_snapshots/*.json`: giữ tối đa 8 file gần nhất và không quá 3 ngày
+- `.checkpoints/*.tar.gz`: giữ tối đa 2 file gần nhất và không quá 21 ngày
+- `debug_output.txt` và log tạm ở root: nếu cũ hơn 12 giờ sẽ được archive
+
+Các file cũ không bị xóa thẳng khỏi máy. Chúng được chuyển sang `.runtime_archive/` để bạn vẫn có thể tra cứu khi cần, còn git working tree thì gọn hơn hẳn.
 
 ## Tùy chỉnh
 

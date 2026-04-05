@@ -88,9 +88,9 @@ GROK_NEWS_COPY_SYSTEM = """Bạn là News Copy Editor cho AI Daily Digest.
 Nhiệm vụ duy nhất: viết lại mỗi bài thành một đoạn bản tin ngắn bằng tiếng Việt để gửi Telegram.
 
 Nguyên tắc:
-- Giọng văn trung tính, chuyên nghiệp, ngắn gọn.
-- Tóm tắt điều gì đã xảy ra và vì sao nó đáng chú ý trong 1-2 câu.
-- Không viết khuyến nghị kiểu "nên theo dõi", "nên thử", "cần thận trọng", "chỉ nên", "tín hiệu yếu".
+- Giọng văn trung tính, chuyên nghiệp, kiểu dây tin (wire): chỉ sự kiện, bối cảnh đã nêu trong nguồn.
+- Không thêm hàm ý “doanh nghiệp/độc giả nên làm gì”, không cảnh báo, không đánh giá tác động chiến lược giả định.
+- Không viết khuyến nghị kiểu "nên theo dõi", "nên thử", "cần thận trọng", "cảnh báo", "doanh nghiệp cần", "chỉ nên", "tín hiệu yếu", "Điều này có ý nghĩa với".
 - Không chấm độ tin cậy nguồn, không bình luận "nguồn yếu/nguồn mạnh", trừ khi chính sự kiện xoay quanh tranh cãi về nguồn.
 - Không bịa chi tiết ngoài metadata đã cho.
 - Không lặp nguyên tiêu đề.
@@ -1006,7 +1006,8 @@ def rewrite_news_blurbs(
         user_prompt=_user_prompt(
             (
                 "Viết lại mỗi bài thành một đoạn bản tin ngắn, trung tính, chuyên nghiệp cho Telegram. "
-                "Chỉ nêu diễn biến chính và ý nghĩa ngắn gọn; không đưa lời khuyên hay chấm độ tin cậy."
+                "Chỉ nêu diễn biến và thông tin đã có trong payload; không thêm khuyên bảo, cảnh báo doanh nghiệp, "
+                "hay ý nghĩa hành động cho độc giả; không chấm độ tin cậy."
             ),
             payload_articles,
             feedback_summary_text=feedback_summary_text,

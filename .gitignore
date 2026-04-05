@@ -30,3 +30,13 @@ Thumbs.db
 
 # Logs
 *.log
+
+# Runtime artifacts
+.runtime_archive/
+.checkpoints/
+context*.txt
+debug_output.txt
+reports/daily_digest_run_*.md
+reports/eval_digest_*.md
+reports/github_agent_brief_*.md
+reports/temporal_snapshots/

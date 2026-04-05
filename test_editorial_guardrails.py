@@ -1,3 +1,5 @@
+import json
+import os
 import unittest
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -18,10 +20,17 @@ from pipeline_runner import build_initial_state, publish_from_preview_state, pub
 from run_health import assess_run_health
 from runtime_presets import apply_runtime_preset
 from mlx_runner import run_json_inference
-from nodes.generate_run_report import _build_run_report_markdown
+from artifact_retention import cleanup_runtime_artifacts
+from nodes.generate_run_report import _build_run_report_markdown, generate_run_report_node
+from source_history import (
+    annotate_article_with_source_history,
+    build_source_history_key,
+    compute_source_history_quality,
+)
 from nodes.classify_and_score import (
     _annotate_event_clusters,
     _apply_freshness_penalty,
+    _articles_same_event,
     _classify_inference_with_retry,
     _held_out_article_fallback,
     _prefilter_primary_type,
@@ -43,15 +52,233 @@ from nodes.save_notion import (
     _get_notion_parent_and_properties,
     _create_notion_page_with_fallback,
     _project_fit_level,
+    _storage_primary_type,
+    _storage_tags,
     _resolve_property_map,
     save_notion_node,
 )
 from nodes.send_telegram import send_telegram_node
 from nodes.summarize_vn import summarize_vn_node
 from source_catalog import load_watchlist_seeds
+from temporal_snapshots import write_temporal_snapshot
 
 
 class EditorialGuardrailsTest(unittest.TestCase):
+    def test_source_history_quality_penalizes_noisy_source(self) -> None:
+        quality = compute_source_history_quality(
+            {
+                "runs_seen": 5,
+                "raw_articles": 18,
+                "scored_articles": 14,
+                "selected_main": 0,
+                "selected_github": 0,
+                "selected_facebook": 1,
+                "skipped_old": 5,
+                "skipped_speculation": 3,
+                "skipped_promo": 2,
+                "skipped_weak": 4,
+            }
+        )
+
+        self.assertGreaterEqual(quality["penalty"], 8)
+        self.assertLessEqual(quality["quality_score"], 35)
+        self.assertIn(quality["status"], {"watch", "muted"})
+
+    def test_source_history_annotation_adjusts_source_priority(self) -> None:
+        article = {
+            "title": "AI community rumor",
+            "url": "https://facebook.com/groups/example/posts/123",
+            "source": "Social Signal: Facebook | Example Group",
+            "source_domain": "facebook.com",
+            "source_priority": 74,
+            "social_platform": "facebook",
+            "facebook_source_url": "https://facebook.com/groups/example",
+        }
+        source_key = build_source_history_key(article)
+        annotated = annotate_article_with_source_history(
+            dict(article),
+            {
+                source_key: {
+                    "source_key": source_key,
+                    "runs_seen": 6,
+                    "raw_articles": 20,
+                    "scored_articles": 14,
+                    "selected_main": 0,
+                    "selected_github": 0,
+                    "selected_facebook": 1,
+                    "skipped_old": 4,
+                    "skipped_speculation": 3,
+                    "skipped_promo": 2,
+                    "skipped_weak": 5,
+                }
+            },
+        )
+
+        self.assertLess(annotated["source_priority"], article["source_priority"])
+        self.assertGreaterEqual(annotated["source_history_penalty"], 8)
+        self.assertIn(annotated["source_history_status"], {"watch", "muted"})
+
+    def test_source_catalog_facade_reexports_split_modules(self) -> None:
+        from source_catalog import CURATED_RSS_FEEDS as facade_feeds
+        from source_catalog import classify_source_kind as facade_classify
+        from source_policy import classify_source_kind as split_classify
+        from source_registry import CURATED_RSS_FEEDS as split_feeds
+
+        self.assertEqual(facade_feeds, split_feeds)
+        self.assertEqual(
+            facade_classify(source="RSS: OpenAI", domain="openai.com"),
+            split_classify(source="RSS: OpenAI", domain="openai.com"),
+        )
+
+    def test_temporal_snapshot_writes_compact_json_without_full_content(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            path = write_temporal_snapshot(
+                state={
+                    "started_at": "2026-04-02T01:45:00+00:00",
+                    "run_mode": "preview",
+                    "run_profile": "fast",
+                    "runtime_config": {
+                        "temporal_snapshot_dir": tmpdir,
+                    },
+                },
+                stage="gather",
+                articles=[
+                    {
+                        "title": "OpenAI ships new agent workflow controls",
+                        "url": "https://openai.com/index/example/",
+                        "source": "RSS: OpenAI News",
+                        "content": "x" * 5000,
+                        "source_kind": "official",
+                        "total_score": 77,
+                    }
+                ],
+                extra={"raw_count": 1},
+            )
+
+            payload = json.loads(Path(path).read_text(encoding="utf-8"))
+            self.assertEqual(payload["stage"], "gather")
+            self.assertEqual(payload["article_count"], 1)
+            self.assertEqual(payload["extra"]["raw_count"], 1)
+            self.assertEqual(payload["articles"][0]["title"], "OpenAI ships new agent workflow controls")
+            self.assertNotIn("content", payload["articles"][0])
+
+    def test_runtime_artifact_cleanup_archives_old_reports_snapshots_and_logs(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            reports_dir = root / "reports"
+            snapshot_dir = reports_dir / "temporal_snapshots"
+            checkpoints_dir = root / ".checkpoints"
+            reports_dir.mkdir(parents=True, exist_ok=True)
+            snapshot_dir.mkdir(parents=True, exist_ok=True)
+            checkpoints_dir.mkdir(parents=True, exist_ok=True)
+
+            current_report = reports_dir / "daily_digest_run_20260402_100000.md"
+            old_report = reports_dir / "daily_digest_run_20260327_090000.md"
+            current_snapshot = snapshot_dir / "20260402_100000_gather.json"
+            old_snapshot = snapshot_dir / "20260327_090000_gather.json"
+            old_checkpoint = checkpoints_dir / "pre_direction_b_20260327_151755.tar.gz"
+            debug_output = root / "debug_output.txt"
+
+            for path in (current_report, old_report, current_snapshot, old_snapshot, old_checkpoint, debug_output):
+                path.write_text("artifact", encoding="utf-8")
+
+            stale_ts = datetime(2026, 2, 20, tzinfo=timezone.utc).timestamp()
+            os.utime(old_report, (stale_ts, stale_ts))
+            os.utime(old_snapshot, (stale_ts, stale_ts))
+            os.utime(old_checkpoint, (stale_ts, stale_ts))
+            os.utime(debug_output, (stale_ts, stale_ts))
+
+            summary = cleanup_runtime_artifacts(
+                project_root=root,
+                state={"runtime_config": {"temporal_snapshot_dir": str(snapshot_dir)}},
+                preserve_paths=[current_report, current_snapshot],
+            )
+
+            archive_root = root / ".runtime_archive"
+            self.assertGreaterEqual(summary["archived_count"], 4)
+            self.assertTrue(current_report.exists())
+            self.assertTrue(current_snapshot.exists())
+            self.assertFalse(old_report.exists())
+            self.assertFalse(old_snapshot.exists())
+            self.assertFalse(old_checkpoint.exists())
+            self.assertFalse(debug_output.exists())
+            self.assertTrue((archive_root / "reports" / old_report.name).exists())
+            self.assertTrue((archive_root / "reports" / "temporal_snapshots" / old_snapshot.name).exists())
+            self.assertTrue((archive_root / ".checkpoints" / old_checkpoint.name).exists())
+            self.assertTrue(any(path.name.startswith("debug_output_") for path in (archive_root / "logs").glob("debug_output_*.txt")))
+
+    @patch("nodes.generate_run_report.cleanup_runtime_artifacts")
+    def test_generate_run_report_appends_artifact_cleanup_section(self, mock_cleanup) -> None:
+        mock_cleanup.return_value = {
+            "enabled": True,
+            "archive_root": "/tmp/archive",
+            "archived_count": 3,
+            "kept_count": 4,
+            "rules": [
+                {"label": "daily_reports", "scanned": 5, "kept": 1, "archived": 4},
+                {"label": "temporal_snapshots", "scanned": 2, "kept": 1, "archived": 1},
+            ],
+            "archived_files": ["/tmp/archive/reports/daily_digest_run_20260327_090000.md"],
+        }
+
+        with TemporaryDirectory() as tmpdir, patch.dict(os.environ, {"DIGEST_REPORTS_DIR": tmpdir}, clear=False):
+            result = generate_run_report_node({"run_mode": "preview", "raw_articles": [], "scored_articles": []})
+            content = Path(result["run_report_path"]).read_text(encoding="utf-8")
+
+        self.assertIn("## Artifact Cleanup", content)
+        self.assertIn("- Archived this run: 3", content)
+        self.assertIn("daily_reports", content)
+        self.assertIn("Sample archived", content)
+
+    @patch("nodes.generate_run_report.load_source_history")
+    @patch("nodes.generate_run_report.batch_source_history_rows")
+    def test_run_report_mentions_source_history_sections(self, mock_rows, mock_load_history) -> None:
+        mock_load_history.return_value = {}
+        mock_rows.return_value = (
+            [
+                {
+                    "source_label": "RSS: OpenAI News",
+                    "source_domain": "openai.com",
+                    "quality_score": 78,
+                    "status": "trusted",
+                    "runs_seen": 4,
+                    "selection_rate": 0.4,
+                }
+            ],
+            [
+                {
+                    "source_label": "Facebook Group Example",
+                    "source_domain": "facebook.com",
+                    "quality_score": 22,
+                    "status": "muted",
+                    "noise_rate": 0.5,
+                    "penalty": 8,
+                }
+            ],
+        )
+
+        markdown = _build_run_report_markdown(
+            {
+                "run_mode": "preview",
+                "run_profile": "preview",
+                "raw_articles": [{"title": "x", "source": "RSS: OpenAI News", "source_domain": "openai.com"}],
+                "new_articles": [],
+                "scored_articles": [{"title": "x", "source": "RSS: OpenAI News", "source_domain": "openai.com"}],
+                "top_articles": [],
+                "low_score_articles": [],
+                "final_articles": [],
+                "telegram_candidates": [],
+                "github_topic_candidates": [],
+                "facebook_topic_candidates": [],
+                "notion_pages": [],
+            },
+            datetime(2026, 4, 2, tzinfo=timezone.utc),
+        )
+
+        self.assertIn("## Source History Signals", markdown)
+        self.assertIn("RSS: OpenAI News", markdown)
+        self.assertIn("Facebook Group Example", markdown)
+
     def test_find_existing_notion_page_url_by_source_url(self) -> None:
         class _FakeDatabases:
             def query(self, database_id: str, **kwargs: dict) -> dict:
@@ -173,6 +400,8 @@ class EditorialGuardrailsTest(unittest.TestCase):
                     "enable_reddit": False,
                     "enable_ddg": False,
                     "enable_telegram_channels": False,
+                    "enable_grok_scout": False,
+                    "enable_grok_x_scout": False,
                 }
             }
         )
@@ -221,6 +450,8 @@ class EditorialGuardrailsTest(unittest.TestCase):
                         "enable_reddit": False,
                         "enable_ddg": False,
                         "enable_telegram_channels": False,
+                        "enable_grok_scout": False,
+                        "enable_grok_x_scout": False,
                     }
                 }
             )
@@ -272,6 +503,9 @@ class EditorialGuardrailsTest(unittest.TestCase):
                     "enable_reddit": False,
                     "enable_ddg": False,
                     "enable_telegram_channels": False,
+                    # Tránh gọi Grok scout/X khi máy có XAI_API_KEY trong .env (timeout/flaky).
+                    "enable_grok_scout": False,
+                    "enable_grok_x_scout": False,
                 }
             }
         )
@@ -403,8 +637,10 @@ class EditorialGuardrailsTest(unittest.TestCase):
         self.assertEqual(len(registry["candidate_sources"]), 1)
         self.assertEqual(registry["candidate_sources"][0]["label"], "Việt Nguyễn AI")
 
+    @patch("nodes.delivery_judge.grok_facebook_score_enabled", return_value=False)
+    @patch("nodes.delivery_judge.grok_delivery_enabled", return_value=False)
     @patch("nodes.delivery_judge.run_json_inference")
-    def test_delivery_judge_routes_github_articles_to_github_topic(self, mock_judge) -> None:
+    def test_delivery_judge_routes_github_articles_to_github_topic(self, mock_judge, *_mocks) -> None:
         mock_judge.return_value = {
             "groundedness_score": 4,
             "freshness_score": 4,
@@ -458,8 +694,10 @@ class EditorialGuardrailsTest(unittest.TestCase):
         self.assertEqual(len(result["github_topic_candidates"]), 1)
         self.assertEqual(result["github_topic_candidates"][0]["github_full_name"], "openai/openai-agents-python")
 
+    @patch("nodes.delivery_judge.grok_facebook_score_enabled", return_value=False)
+    @patch("nodes.delivery_judge.grok_delivery_enabled", return_value=False)
     @patch("nodes.delivery_judge.run_json_inference")
-    def test_delivery_judge_routes_x_discovered_github_repo_to_github_topic(self, mock_judge) -> None:
+    def test_delivery_judge_routes_x_discovered_github_repo_to_github_topic(self, mock_judge, *_mocks) -> None:
         mock_judge.return_value = {
             "groundedness_score": 4,
             "freshness_score": 4,
@@ -515,8 +753,10 @@ class EditorialGuardrailsTest(unittest.TestCase):
         self.assertEqual(result["github_topic_candidates"][0]["source_domain"], "github.com")
         self.assertEqual(result["github_topic_candidates"][0]["source"], "Grok X Scout: builder-posts | @OpenAIDevs")
 
+    @patch("nodes.delivery_judge.grok_facebook_score_enabled", return_value=False)
+    @patch("nodes.delivery_judge.grok_delivery_enabled", return_value=False)
     @patch("nodes.delivery_judge.run_json_inference")
-    def test_delivery_judge_routes_facebook_articles_to_facebook_topic(self, mock_judge) -> None:
+    def test_delivery_judge_routes_facebook_articles_to_facebook_topic(self, mock_judge, *_mocks) -> None:
         mock_judge.return_value = {
             "groundedness_score": 4,
             "freshness_score": 4,
@@ -556,8 +796,10 @@ class EditorialGuardrailsTest(unittest.TestCase):
         self.assertEqual(len(result["facebook_topic_candidates"]), 1)
         self.assertEqual(result["facebook_topic_candidates"][0]["source_domain"], "facebook.com")
 
+    @patch("nodes.delivery_judge.grok_facebook_score_enabled", return_value=False)
+    @patch("nodes.delivery_judge.grok_delivery_enabled", return_value=False)
     @patch("nodes.delivery_judge.run_json_inference")
-    def test_delivery_judge_skips_facebook_promo_post(self, mock_judge) -> None:
+    def test_delivery_judge_skips_facebook_promo_post(self, mock_judge, *_mocks) -> None:
         mock_judge.return_value = {}
 
         result = delivery_judge_node(
@@ -641,8 +883,10 @@ class EditorialGuardrailsTest(unittest.TestCase):
         self.assertEqual(len(result["facebook_topic_candidates"]), 1)
         self.assertEqual(result["facebook_topic_candidates"][0]["delivery_decision"], "include")
 
+    @patch("nodes.delivery_judge.grok_facebook_score_enabled", return_value=False)
+    @patch("nodes.delivery_judge.grok_delivery_enabled", return_value=False)
     @patch("nodes.delivery_judge.run_json_inference")
-    def test_delivery_judge_diversifies_main_candidates_by_type(self, mock_judge) -> None:
+    def test_delivery_judge_diversifies_main_candidates_by_type(self, mock_judge, *_mocks) -> None:
         mock_judge.return_value = {
             "groundedness_score": 4,
             "freshness_score": 4,
@@ -1162,6 +1406,83 @@ class EditorialGuardrailsTest(unittest.TestCase):
         self.assertNotIn("brief 8h sáng", product_message)
         self.assertNotIn("nhắc lại", product_message.lower())
 
+    def test_build_safe_digest_messages_archive_dedup_by_title(self) -> None:
+        # Regression: archive replay trước đây có thể chèn 2 entry trùng title
+        # (cùng section_type) nếu chúng đến từ history_articles khác nhau.
+        history_articles = [
+            {
+                "title": "AI overly affirms users asking for personal advice",
+                "url": "https://reddit.com/r/artificial/a",
+                "primary_type": "Research",
+                "summary": "Ý chính của tin này là: x",
+                "source": "RSS: Example",
+                "relevance_score": 80,
+                "created_at": "2026-03-26T01:00:00+00:00",
+            },
+            {
+                "title": "AI overly affirms users asking for personal advice",
+                "url": "https://reddit.com/r/OpenAI/b",
+                "primary_type": "Research",
+                "summary": "Ý chính của tin này là: y",
+                "source": "RSS: Example",
+                "relevance_score": 79,
+                "created_at": "2026-03-26T02:00:00+00:00",
+            },
+        ]
+
+        messages = build_safe_digest_messages([], [], history_articles=history_articles, today=date(2026, 3, 26))
+
+        research_message = next(message for message in messages if "🔬 Research" in message)
+        title_occurrences = research_message.lower().count("ai overly affirms users asking for personal advice")
+        self.assertEqual(title_occurrences, 1)
+
+    def test_build_safe_digest_messages_dedup_same_story_different_headlines(self) -> None:
+        # Cùng sự kiện, hai URL/title khác nhau (headline ngắn vs dài) — chỉ giữ một bullet Business.
+        articles = [
+            {
+                "title": "OpenAI acquires TBPN",
+                "url": "https://openai.com/index/openai-acquires-tbpn",
+                "primary_type": "Business",
+                "note_summary_vi": "OpenAI mua TBPN để mở rộng đối thoại AI.",
+                "source": "RSS: OpenAI",
+                "source_domain": "openai.com",
+                "total_score": 72,
+                "delivery_score": 12,
+                "delivery_decision": "include",
+                "grok_priority_score": 82,
+                "is_ai_relevant": True,
+            },
+            {
+                "title": "OpenAI acquires TBPN, the buzzy founder-led business talk show",
+                "url": "https://example.com/tbpn-long-headline",
+                "primary_type": "Business",
+                "note_summary_vi": "Bản dài hơn về deal TBPN và show trên YouTube.",
+                "source": "RSS: Example",
+                "source_domain": "example.com",
+                "total_score": 70,
+                "delivery_score": 11,
+                "delivery_decision": "include",
+                "grok_priority_score": 78,
+                "is_ai_relevant": True,
+            },
+        ]
+        messages = build_safe_digest_messages(
+            articles,
+            [],
+            today=date(2026, 4, 3),
+            per_type=3,
+            allow_archive_replay=False,
+        )
+        business_message = next(message for message in messages if "💼 Business" in message)
+        self.assertIn("OpenAI acquires TBPN", business_message)
+        self.assertNotIn("founder-led", business_message.lower())
+
+    def test_articles_same_event_matches_short_headline_inside_long(self) -> None:
+        short_a = {"title": "OpenAI acquires TBPN"}
+        long_b = {"title": "OpenAI acquires TBPN, the buzzy founder-led business talk show"}
+        self.assertTrue(_articles_same_event(short_a, long_b))
+        self.assertTrue(_articles_same_event(long_b, short_a))
+
     def test_build_safe_digest_messages_allows_high_priority_overflow(self) -> None:
         articles = [
             {
@@ -1396,6 +1717,8 @@ class EditorialGuardrailsTest(unittest.TestCase):
             "summary_mode": "deterministic_sections",
             "summary_warnings": [],
             "telegram_sent": True,
+            "gather_snapshot_path": "reports/temporal_snapshots/20260402_084400_gather.json",
+            "scored_snapshot_path": "reports/temporal_snapshots/20260402_084400_scored.json",
         }
 
         markdown = _build_run_report_markdown(state, datetime(2026, 3, 27, tzinfo=timezone.utc))
@@ -1408,6 +1731,8 @@ class EditorialGuardrailsTest(unittest.TestCase):
         self.assertIn("product_update", markdown)
         self.assertIn("## GitHub Topic Candidates", markdown)
         self.assertIn("## Run Health", markdown)
+        self.assertIn("## Temporal Snapshots", markdown)
+        self.assertIn("20260402_084400_gather.json", markdown)
         self.assertIn("Publish ready", markdown)
         self.assertIn("openai/codex", markdown)
         self.assertIn("- Run mode: preview", markdown)
@@ -1696,6 +2021,45 @@ class EditorialGuardrailsTest(unittest.TestCase):
 
         self.assertEqual(config["runtime_mlx_model"], "mlx-community/Qwen2.5-32B-Instruct-4bit")
 
+    def test_grok_smart_preset_expands_grok_budget_without_replacing_core_pipeline(self) -> None:
+        config = apply_runtime_preset(
+            "grok_smart",
+            {
+                "max_classify_articles": 10,
+                "max_deep_analysis_articles": 4,
+                "gather_rss_hours": 72,
+                "github_max_watchlist_repos": 6,
+                "github_max_orgs": 4,
+                "github_max_queries": 4,
+                "github_max_org_repos": 4,
+                "github_max_search_results": 4,
+                "classify_content_char_limit": 900,
+                "classify_max_tokens": 320,
+            },
+        )
+
+        self.assertGreaterEqual(config["max_classify_articles"], 12)
+        self.assertGreaterEqual(config["max_deep_analysis_articles"], 5)
+        self.assertTrue(config["enable_rss"])
+        self.assertTrue(config["enable_github"])
+        self.assertTrue(config["enable_watchlist"])
+        self.assertTrue(config["enable_ddg"])
+        self.assertTrue(config["enable_hn"])
+        self.assertTrue(config["enable_reddit"])
+        self.assertTrue(config["enable_telegram_channels"])
+        self.assertTrue(config["enable_grok_delivery_judge"])
+        self.assertTrue(config["enable_grok_prefilter"])
+        self.assertTrue(config["enable_grok_final_editor"])
+        self.assertTrue(config["enable_grok_news_copy"])
+        self.assertTrue(config["enable_grok_facebook_score"])
+        self.assertTrue(config["enable_grok_source_gap"])
+        self.assertTrue(config["enable_grok_scout"])
+        self.assertTrue(config["enable_grok_x_scout"])
+        self.assertLessEqual(config["grok_scout_max_queries"], 3)
+        self.assertLessEqual(config["grok_x_scout_max_queries"], 3)
+        self.assertIsInstance(config["grok_x_scout_allowed_handles"], list)
+        self.assertGreaterEqual(len(config["grok_x_scout_allowed_handles"]), 8)
+
     def test_normalize_source_assigns_source_kind_for_official_and_community(self) -> None:
         normalized = normalize_source_node(
             {
@@ -1749,6 +2113,8 @@ class EditorialGuardrailsTest(unittest.TestCase):
                     "enable_reddit": False,
                     "enable_ddg": False,
                     "enable_telegram_channels": False,
+                    "enable_grok_scout": False,
+                    "enable_grok_x_scout": False,
                     "github_max_watchlist_repos": 2,
                     "github_max_orgs": 1,
                     "github_max_queries": 1,
@@ -1925,33 +2291,40 @@ class EditorialGuardrailsTest(unittest.TestCase):
             "batch_note": "One useful GitHub-linked post found on X.",
         }
 
-        result = gather_news_node(
-            {
-                "runtime_config": {
-                    "enable_rss": False,
-                    "enable_github": False,
-                    "enable_social_signals": False,
-                    "enable_watchlist": False,
-                    "enable_hn": False,
-                    "enable_reddit": False,
-                    "enable_ddg": False,
-                    "enable_telegram_channels": False,
-                    "enable_facebook_auto": False,
-                    "enable_grok_scout": False,
-                    "enable_grok_x_scout": True,
-                    "grok_x_scout_max_queries": 1,
-                    "grok_x_scout_max_articles": 2,
+        with TemporaryDirectory() as tmpdir:
+            result = gather_news_node(
+                {
+                    "runtime_config": {
+                        "enable_rss": False,
+                        "enable_github": False,
+                        "enable_social_signals": False,
+                        "enable_watchlist": False,
+                        "enable_hn": False,
+                        "enable_reddit": False,
+                        "enable_ddg": False,
+                        "enable_telegram_channels": False,
+                        "enable_facebook_auto": False,
+                        "enable_grok_scout": False,
+                        "enable_grok_x_scout": True,
+                        "grok_x_scout_max_queries": 1,
+                        "grok_x_scout_max_articles": 2,
+                        "temporal_snapshot_dir": tmpdir,
+                    }
                 }
-            }
-        )
+            )
 
-        self.assertEqual(result["grok_scout_count"], 1)
-        self.assertEqual(len(result["raw_articles"]), 1)
-        article = result["raw_articles"][0]
-        self.assertTrue(article["grok_x_scout"])
-        self.assertEqual(article["url"], "https://github.com/example/new-mcp-repo")
-        self.assertEqual(article["x_post_url"], "https://x.com/OpenAIDevs/status/123")
-        self.assertIn("@OpenAIDevs", article["source"])
+            self.assertEqual(result["grok_scout_count"], 1)
+            self.assertEqual(len(result["raw_articles"]), 1)
+            article = result["raw_articles"][0]
+            self.assertTrue(article["grok_x_scout"])
+            self.assertEqual(article["url"], "https://github.com/example/new-mcp-repo")
+            self.assertEqual(article["x_post_url"], "https://x.com/OpenAIDevs/status/123")
+            self.assertIn("@OpenAIDevs", article["source"])
+            snapshot_path = Path(result["gather_snapshot_path"])
+            self.assertTrue(snapshot_path.exists())
+            payload = json.loads(snapshot_path.read_text(encoding="utf-8"))
+            self.assertEqual(payload["stage"], "gather")
+            self.assertEqual(payload["article_count"], 1)
 
     @patch("nodes.gather_news.scout_x_posts")
     @patch("nodes.gather_news._read_telegram_channels", return_value=[])
@@ -2194,6 +2567,51 @@ class EditorialGuardrailsTest(unittest.TestCase):
         self.assertEqual(_project_fit_level(28), "High")
         self.assertEqual(_project_fit_level(18), "Medium")
         self.assertEqual(_project_fit_level(8), "Low")
+
+    def test_storage_primary_type_uses_conservative_title_heuristic_for_weak_thin_article(self) -> None:
+        self.assertEqual(
+            _storage_primary_type(
+                {
+                    "title": "AI startup raises new funding for expansion",
+                    "primary_type": "Society",
+                    "total_score": 28,
+                    "content_available": False,
+                    "source_tier": "c",
+                },
+                "low",
+            ),
+            "Business",
+        )
+
+    def test_storage_tags_drop_low_confidence_weak_source_noise(self) -> None:
+        self.assertEqual(
+            _storage_tags(
+                {
+                    "tags": ["funding", "enterprise_ai"],
+                    "total_score": 48,
+                    "content_available": False,
+                    "source_tier": "c",
+                    "is_ai_relevant": True,
+                },
+                "low",
+            ),
+            [],
+        )
+
+    def test_storage_tags_keep_grounded_strong_article(self) -> None:
+        self.assertEqual(
+            _storage_tags(
+                {
+                    "tags": ["funding", "infrastructure"],
+                    "total_score": 74,
+                    "content_available": True,
+                    "source_tier": "a",
+                    "is_ai_relevant": True,
+                },
+                "high",
+            ),
+            ["funding", "infrastructure"],
+        )
 
     def test_normalize_source_does_not_promote_fetched_at_to_published_at(self) -> None:
         state = {

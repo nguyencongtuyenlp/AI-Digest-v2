@@ -38,8 +38,38 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from db import save_article
 from editorial_guardrails import build_article_grounding
 from memory import store_article
+from source_history import record_source_history_run
 
 logger = logging.getLogger(__name__)
+
+STORAGE_PRODUCT_KEYWORDS = ("launch", "release", "api", "sdk", "feature", "model", "platform", "capability")
+STORAGE_BUSINESS_KEYWORDS = (
+    "startup",
+    "funding",
+    "raises",
+    "partnership",
+    "partners with",
+    "market",
+    "competition",
+    "competitive",
+    "race",
+    "lead",
+    "dominance",
+)
+STORAGE_POLICY_KEYWORDS = (
+    "law",
+    "regulation",
+    "policy",
+    "governance",
+    "compliance",
+    "safety",
+    "security",
+    "cyberattack",
+    "breach",
+    "hack",
+    "lawsuit",
+    "investigation",
+)
 
 
 PROPERTY_ALIASES: dict[str, list[tuple[str, str]]] = {
@@ -145,6 +175,60 @@ def _project_fit_level(c3_score: int) -> str:
     if c3_score >= 12:
         return "Medium"
     return "Low"
+
+
+def _storage_primary_type(article: dict[str, Any], confidence_label: str = "") -> str:
+    current_type = str(article.get("primary_type", "Practical") or "Practical").strip() or "Practical"
+    title = str(article.get("title", "") or "").lower()
+    total_score = int(article.get("total_score", 0) or 0)
+    content_available = bool(article.get("content_available", False))
+    source_tier = str(article.get("source_tier", "unknown") or "unknown").lower()
+    ai_relevant = article.get("is_ai_relevant", True) is not False
+    confidence = str(confidence_label or article.get("confidence_label", "") or "").strip().lower()
+
+    if not ai_relevant:
+        return "Practical"
+
+    weak_thin_article = (
+        not content_available
+        and source_tier in {"c", "unknown"}
+        and total_score < 40
+        and confidence in {"", "low", "medium"}
+    )
+    if not weak_thin_article:
+        return current_type
+
+    if any(keyword in title for keyword in STORAGE_POLICY_KEYWORDS):
+        return "Policy"
+    if any(keyword in title for keyword in STORAGE_BUSINESS_KEYWORDS):
+        return "Business"
+    if any(keyword in title for keyword in STORAGE_PRODUCT_KEYWORDS):
+        return "Product"
+    return "Practical"
+
+
+def _storage_tags(article: dict[str, Any], confidence_label: str = "") -> list[str]:
+    raw_tags = article.get("tags", [])
+    if not isinstance(raw_tags, list):
+        return []
+
+    tags = [str(tag or "").strip() for tag in raw_tags if str(tag or "").strip()]
+    if not tags:
+        return []
+
+    total_score = int(article.get("total_score", 0) or 0)
+    content_available = bool(article.get("content_available", False))
+    source_tier = str(article.get("source_tier", "unknown") or "unknown").lower()
+    ai_relevant = article.get("is_ai_relevant", True) is not False
+    is_old_news = bool(article.get("is_old_news", False) or article.get("is_stale_candidate", False))
+    confidence = str(confidence_label or article.get("confidence_label", "") or "").strip().lower()
+
+    if not ai_relevant or is_old_news or total_score < 40:
+        return []
+    if source_tier in {"c", "unknown"} and (not content_available or confidence == "low" or total_score < 55):
+        return []
+
+    return tags[:5]
 
 
 def _notion_date_start(value: str) -> str | None:
@@ -414,6 +498,8 @@ def _create_notion_page(
     fact_anchors = grounding.get("fact_anchors", [])
     reasonable_inferences = grounding.get("reasonable_inferences", [])
     unknowns = grounding.get("unknowns", [])
+    ptype = _storage_primary_type(article, confidence_label)
+    tags = _storage_tags(article, confidence_label)
     project_fit_level = _project_fit_level(c3_score)
     property_map = _resolve_property_map(database_properties)
     delivery_decision = str(article.get("delivery_decision", "") or "")
@@ -937,5 +1023,12 @@ def save_notion_node(state: dict[str, Any]) -> dict[str, Any]:
         "✅" if notion_available else "⏭️",
         "✅" if persist_local else "⏭️",
     )
+
+    if persist_local:
+        try:
+            record_source_history_run(state)
+            logger.info("📚 Source history updated from current publish batch.")
+        except Exception as exc:
+            logger.warning("Source history update skipped: %s", exc)
 
     return {"notion_pages": notion_pages}

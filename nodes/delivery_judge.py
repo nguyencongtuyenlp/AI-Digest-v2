@@ -173,10 +173,30 @@ def _deterministic_delivery_assessment(article: dict[str, Any]) -> dict[str, Any
     event_cluster_size = int(article.get("event_cluster_size", 1) or 1)
     is_ai_relevant = article.get("is_ai_relevant", True) is not False
     title = str(article.get("title", "") or "")
+    lane_hint = str(article.get("delivery_lane_hint", "") or "").strip().lower()
+    source_history_penalty = int(article.get("source_history_penalty", 0) or 0)
+    source_history_bonus = int(article.get("source_history_bonus", 0) or 0)
+    source_history_noise_rate = float(article.get("source_history_noise_rate", 0.0) or 0.0)
+    source_history_status = str(article.get("source_history_status", "") or "").strip().lower()
 
     groundedness_score = 4 if confidence == "high" else 3 if confidence == "medium" else 2
     freshness_score = 0 if is_stale_candidate else 2 if freshness_unknown else 4
-    operator_value_score = 4 if score >= 70 else 3 if score >= 50 else 2 if score >= 35 else 1
+    operator_value_score = 4 if score >= 65 else 3 if score >= 45 else 2 if score >= 30 else 1
+
+    if source_kind == "official" and score >= 40:
+        operator_value_score = max(operator_value_score, 3)
+    if source_kind == "strong_media" and score >= 45:
+        operator_value_score = max(operator_value_score, 3)
+
+    if lane_hint in {"github_topic", "facebook_topic"}:
+        return {
+            "groundedness_score": groundedness_score,
+            "freshness_score": freshness_score,
+            "operator_value_score": operator_value_score,
+            "decision": "skip",
+            "rationale": "Bài này thuộc lane phụ, không nên cạnh tranh vào main brief.",
+            "skip_reason": "lane_locked",
+        }
 
     if not is_ai_relevant:
         return {
@@ -185,6 +205,7 @@ def _deterministic_delivery_assessment(article: dict[str, Any]) -> dict[str, Any
             "operator_value_score": 0,
             "decision": "skip",
             "rationale": "Bài chưa đủ liên quan trực tiếp tới AI để xuất hiện trong brief.",
+            "skip_reason": "not_ai",
         }
 
     if event_cluster_size >= 2:
@@ -198,6 +219,7 @@ def _deterministic_delivery_assessment(article: dict[str, Any]) -> dict[str, Any
             "operator_value_score": operator_value_score,
             "decision": "skip",
             "rationale": "Bài này trùng event với một bài mạnh hơn trong cùng batch.",
+            "skip_reason": "duplicate_event",
         }
 
     if is_stale_candidate:
@@ -208,6 +230,7 @@ def _deterministic_delivery_assessment(article: dict[str, Any]) -> dict[str, Any
             "operator_value_score": operator_value_score,
             "decision": decision,
             "rationale": "Bài có dấu hiệu cũ, chỉ nên giữ nếu thật sự là nguồn mạnh và còn giá trị quyết định.",
+            "skip_reason": "old" if decision == "skip" else "review_old",
         }
 
     if is_old_news or freshness_bucket in {"aging", "stale"}:
@@ -220,6 +243,7 @@ def _deterministic_delivery_assessment(article: dict[str, Any]) -> dict[str, Any
             "rationale": (
                 "Bài không còn đủ mới cho brief buổi sáng, chỉ giữ nếu là nguồn mạnh và vẫn còn giá trị quyết định."
             ),
+            "skip_reason": "old" if decision == "skip" else "review_old",
         }
 
     if freshness_unknown and source_tier == "c":
@@ -229,6 +253,7 @@ def _deterministic_delivery_assessment(article: dict[str, Any]) -> dict[str, Any
             "operator_value_score": operator_value_score,
             "decision": "skip",
             "rationale": "Nguồn yếu và không rõ độ mới, không phù hợp để lên brief.",
+            "skip_reason": "weak_source",
         }
 
     if source_kind == "community" and COMMUNITY_SPECULATION_TITLE_RE.search(title):
@@ -238,6 +263,7 @@ def _deterministic_delivery_assessment(article: dict[str, Any]) -> dict[str, Any
             "operator_value_score": max(0, operator_value_score - 1),
             "decision": "skip",
             "rationale": "Bài cộng đồng mang tính đồn đoán hoặc headline dạng speculation, không phù hợp cho main brief.",
+            "skip_reason": "speculation",
         }
 
     if source_kind == "community" and (freshness_unknown or confidence == "low") and score < 60:
@@ -247,7 +273,32 @@ def _deterministic_delivery_assessment(article: dict[str, Any]) -> dict[str, Any
             "operator_value_score": operator_value_score,
             "decision": "review" if score >= 55 else "skip",
             "rationale": "Bài cộng đồng còn mỏng hoặc thiếu độ mới rõ ràng, không nên ưu tiên cho main brief.",
+            "skip_reason": "weak_signal" if score < 55 else "",
         }
+
+    if source_history_penalty >= 8 and source_kind in {"community", "search"} and score < 70:
+        return {
+            "groundedness_score": max(1, groundedness_score - 1),
+            "freshness_score": freshness_score,
+            "operator_value_score": max(0, operator_value_score - 1),
+            "decision": "skip",
+            "rationale": "Nguồn này có lịch sử cho ra nhiều tín hiệu yếu hoặc cũ, nên bài chưa đủ mạnh để vào main brief.",
+            "skip_reason": "weak_source_history",
+        }
+
+    if source_history_noise_rate >= 0.35 and source_kind in {"community", "search"} and score < 75:
+        return {
+            "groundedness_score": max(1, groundedness_score - 1),
+            "freshness_score": freshness_score,
+            "operator_value_score": max(0, operator_value_score - 1),
+            "decision": "review" if score >= 68 else "skip",
+            "rationale": "Nguồn này gần đây có tỷ lệ noise cao, nên bài cần tiêu chuẩn chặt hơn bình thường.",
+            "skip_reason": "weak_source_history" if score < 68 else "",
+        }
+
+    if source_history_bonus > 0 and source_history_status in {"trusted", "positive"} and source_kind in {"official", "strong_media"}:
+        groundedness_score = min(5, groundedness_score + 1)
+        operator_value_score = min(5, operator_value_score + 1)
 
     if ROUNDUP_TITLE_RE.search(title) and (freshness_unknown or is_old_news or freshness_bucket in {"aging", "stale"}):
         return {
@@ -256,6 +307,7 @@ def _deterministic_delivery_assessment(article: dict[str, Any]) -> dict[str, Any
             "operator_value_score": max(1, operator_value_score - 1),
             "decision": "review" if source_tier == "a" and score >= 70 else "skip",
             "rationale": "Bài dạng roundup/recap không còn đủ sắc độ mới để ưu tiên ở main brief.",
+            "skip_reason": "roundup",
         }
 
     if EVENT_PROMO_TITLE_RE.search(title) and source_kind not in {"official"}:
@@ -265,6 +317,7 @@ def _deterministic_delivery_assessment(article: dict[str, Any]) -> dict[str, Any
             "operator_value_score": max(0, operator_value_score - 1),
             "decision": "skip",
             "rationale": "Bài mang tính event promo/đăng ký tham dự, không phù hợp cho main news brief.",
+            "skip_reason": "promo",
         }
 
     if score < 35 or (confidence == "low" and not content_available):
@@ -274,14 +327,30 @@ def _deterministic_delivery_assessment(article: dict[str, Any]) -> dict[str, Any
             "operator_value_score": operator_value_score,
             "decision": "skip",
             "rationale": "Tín hiệu yếu hoặc thiếu bằng chứng để chiếm chỗ trong brief.",
+            "skip_reason": "weak_signal",
         }
 
     if isinstance(age_hours, (int, float)) and age_hours <= 72:
         freshness_score = min(5, freshness_score + 1)
 
     avg = (groundedness_score + freshness_score + operator_value_score) / 3
-    decision = "include" if avg >= 3.3 and score >= 45 else "review" if avg >= 2.8 else "skip"
-    rationale = "Đủ mạnh để đưa vào brief." if decision == "include" else "Nên review thêm trước khi đưa vào brief."
+
+    if avg >= 3.0 and score >= 40:
+        decision = "include"
+    elif source_kind in {"official", "strong_media"} and avg >= 2.8 and score >= 35:
+        decision = "include"
+    elif avg >= 2.5:
+        decision = "review"
+    else:
+        decision = "skip"
+
+    rationale = (
+        "Đủ mạnh để đưa vào brief."
+        if decision == "include"
+        else "Nên review thêm trước khi đưa vào brief."
+        if decision == "review"
+        else "Tín hiệu yếu hoặc thiếu bằng chứng để chiếm chỗ trong brief."
+    )
 
     return {
         "groundedness_score": groundedness_score,
@@ -289,6 +358,7 @@ def _deterministic_delivery_assessment(article: dict[str, Any]) -> dict[str, Any
         "operator_value_score": operator_value_score,
         "decision": decision,
         "rationale": rationale,
+        "skip_reason": "weak_signal" if decision == "skip" else "",
     }
 
 
@@ -596,6 +666,9 @@ def _merge_judge_result(article: dict[str, Any], base: dict[str, Any], judged: d
         rationale = str(judged.get("rationale", "")).strip()
         if rationale:
             result["rationale"] = rationale
+        skip_reason = str(judged.get("skip_reason", "")).strip().lower()
+        if skip_reason:
+            result["skip_reason"] = skip_reason
 
     article["groundedness_score"] = max(0, min(5, int(result["groundedness_score"])))
     article["freshness_score"] = max(0, min(5, int(result["freshness_score"])))
@@ -614,6 +687,43 @@ def _merge_judge_result(article: dict[str, Any], base: dict[str, Any], judged: d
         "final_decision": article["delivery_decision"],
         "rationale": article["delivery_rationale"],
     }
+    article["delivery_skip_reason"] = (
+        str(result.get("skip_reason", "") or "").strip().lower()
+        if article["delivery_decision"] == "skip"
+        else ""
+    )
+
+
+def _infer_skip_reason_from_article(article: dict[str, Any]) -> str:
+    explicit = str(article.get("delivery_skip_reason", "") or "").strip().lower()
+    if explicit:
+        return explicit
+
+    rationale = " ".join(
+        part for part in [
+            str(article.get("delivery_rationale", "") or "").strip(),
+            str(article.get("facebook_topic_skip_reason", "") or "").strip(),
+        ]
+        if part
+    ).lower()
+
+    if any(token in rationale for token in ("lane phụ", "lane phu")):
+        return "lane_locked"
+    if any(token in rationale for token in ("trùng event", "trung event")):
+        return "duplicate_event"
+    if any(token in rationale for token in ("đồn đoán", "speculation", "rumor", "leak")):
+        return "speculation"
+    if any(token in rationale for token in ("event promo", "đăng ký", "register", "webinar", "promo")):
+        return "promo"
+    if any(token in rationale for token in ("không còn đủ mới", "dấu hiệu cũ", "bị ghim", "không còn mới")):
+        return "old"
+    if any(token in rationale for token in ("nguồn yếu", "tỷ lệ noise", "noise cao")):
+        return "weak_source_history"
+    if any(token in rationale for token in ("không đủ liên quan", "liên quan trực tiếp tới ai")):
+        return "not_ai"
+    if any(token in rationale for token in ("tín hiệu yếu", "quá mỏng", "quá yếu")):
+        return "weak_signal"
+    return ""
 
 
 def _candidate_sort_key(article: dict[str, Any]) -> tuple[int, int, int]:
@@ -762,7 +872,7 @@ def _apply_grok_facebook_topic_rerank(
         limit=grok_facebook_max_articles(runtime_config),
         diversify_by_type=False,
     )
-    if not shortlist:
+    if len(shortlist) < 1:
         return
 
     logger.info("🧠 Grok Facebook judge: scoring %d shortlist articles.", len(shortlist))
@@ -807,7 +917,7 @@ def _apply_grok_final_editor_pass(
         return
 
     shortlist = list(telegram_candidates[:grok_final_editor_max_articles(runtime_config)])
-    if not shortlist:
+    if len(shortlist) < 2:
         return
 
     logger.info("🧠 Grok final editor: ordering %d selected main brief articles.", len(shortlist))
@@ -923,8 +1033,12 @@ def delivery_judge_node(state: dict[str, Any]) -> dict[str, Any]:
                 logger.debug("Delivery judge fallback for '%s': %s", article.get("title", "")[:50], exc)
 
         _merge_judge_result(article, base, judged)
+        if article.get("delivery_decision") == "skip":
+            article["delivery_skip_reason"] = _infer_skip_reason_from_article(article)
         if is_facebook_article:
-            article["facebook_topic_skip_reason"] = str(base.get("skip_reason", "") or "")
+            article["facebook_topic_skip_reason"] = str(
+                article.get("delivery_skip_reason", "") or base.get("skip_reason", "") or ""
+            )
         reviewed_articles.append(article)
 
     _apply_grok_delivery_rerank(
@@ -945,7 +1059,7 @@ def delivery_judge_node(state: dict[str, Any]) -> dict[str, Any]:
             and not _is_github_topic_article(article)
             and not _is_facebook_topic_article(article)
         ],
-        limit=8,
+        limit=12,
         diversify_by_type=True,
     )
     github_topic_candidates = _select_diverse_candidates(

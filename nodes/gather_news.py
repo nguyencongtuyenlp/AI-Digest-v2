@@ -51,6 +51,24 @@ from source_catalog import (
     load_watchlist_seeds,
     social_signal_inbox_path,
 )
+from source_history import (
+    annotate_articles_with_source_history,
+    annotate_sources_with_history,
+    filter_discovered_sources_by_history,
+    load_source_history,
+)
+from source_adapters import facebook_adapter as _facebook_adapter
+from source_adapters.github_adapter import fetch_github_articles as _fetch_github_articles_impl
+from source_adapters.grok_scout_adapter import (
+    DEFAULT_X_SCOUT_HANDLES,
+    WEB_SCOUT_PLANS,
+    X_SCOUT_PLANS,
+    build_grok_scout_article as _build_grok_scout_article_impl,
+    build_grok_x_scout_article as _build_grok_x_scout_article_impl,
+    run_grok_scout as _run_grok_scout_impl,
+    run_grok_x_scout as _run_grok_x_scout_impl,
+    runtime_x_scout_handles as _runtime_x_scout_handles_impl,
+)
 from xai_grok import (
     grok_scout_enabled,
     grok_scout_max_articles,
@@ -61,6 +79,7 @@ from xai_grok import (
     scout_x_posts,
     scout_web_search_articles,
 )
+from temporal_snapshots import write_temporal_snapshot
 
 logger = logging.getLogger(__name__)
 
@@ -73,6 +92,7 @@ REQUEST_HEADERS = {
 
 FOUNDER_GRADE_SIGNAL_KEYWORDS = (
     "ai",
+    "a.i",
     "artificial intelligence",
     "tri tue nhan tao",
     "trí tuệ nhân tạo",
@@ -84,6 +104,7 @@ FOUNDER_GRADE_SIGNAL_KEYWORDS = (
     "anthropic",
     "claude",
     "gpt",
+    "chatgpt",
     "gemini",
     "deepmind",
     "xai",
@@ -106,6 +127,37 @@ FOUNDER_GRADE_SIGNAL_KEYWORDS = (
     "regulation",
     "policy",
     "vietnam",
+    "mcp",
+    "cursor",
+    "copilot",
+    "prompt",
+    "workflow",
+    "ứng dụng ai",
+    "công cụ ai",
+    "mô hình",
+    "dữ liệu",
+    "nghiện ai",
+    "openclaw",
+    "deep learning",
+    "machine learning",
+    "fine-tune",
+    "finetune",
+    "rag",
+    "vector",
+    "embedding",
+    "transformer",
+    "diffusion",
+    "stable diffusion",
+    "midjourney",
+    "sora",
+    "llama",
+    "mistral",
+    "qwen",
+    "phi-",
+    "microsoft",
+    "google",
+    "meta ai",
+    "apple intelligence",
 )
 
 FOUNDER_GRADE_NOISE_KEYWORDS = (
@@ -129,27 +181,6 @@ FOUNDER_GRADE_NOISE_KEYWORDS = (
     "benefit",
     "geforce now",
     "skincare",
-)
-
-GITHUB_AGENT_SIGNAL_KEYWORDS = (
-    "agent",
-    "agents",
-    "agentic",
-    "claude code",
-    "codex",
-    "mcp",
-    "model context protocol",
-    "browser-use",
-    "browser use",
-    "plugin",
-    "tool use",
-    "workflow",
-    "orchestration",
-    "memory",
-    "multi-agent",
-    "multi agent",
-    "server",
-    "sdk",
 )
 
 SOCIAL_SIGNAL_ALLOWED_DOMAINS = (
@@ -273,66 +304,6 @@ FACEBOOK_NEWS_RECAP_RE = re.compile(
     re.IGNORECASE,
 )
 
-GROK_SCOUT_SEARCH_PLANS: tuple[dict[str, Any], ...] = (
-    {
-        "name": "official-vendors",
-        "domains": ["openai.com", "anthropic.com", "blog.google", "deepmind.google", "huggingface.co"],
-        "query": (
-            "Most important new AI model, API, enterprise, agent, or release-note announcements "
-            "from official vendor sources in the last 72 hours"
-        ),
-        "per_query_limit": 3,
-    },
-    {
-        "name": "official-platforms",
-        "domains": ["nvidianews.nvidia.com", "blogs.microsoft.com", "aws.amazon.com", "databricks.com", "cloudflare.com"],
-        "query": (
-            "Most important new AI infrastructure, enterprise platform, or deployment announcements "
-            "from official sources in the last 72 hours"
-        ),
-        "per_query_limit": 3,
-    },
-    {
-        "name": "strong-media-backstop",
-        "domains": ["reuters.com", "techcrunch.com", "cnbc.com", "theverge.com", "arstechnica.com"],
-        "query": (
-            "Most decision-useful AI product, business, or policy stories in the last 72 hours "
-            "for startup founders and operators"
-        ),
-        "per_query_limit": 2,
-    },
-)
-
-GROK_X_SCOUT_DEFAULT_HANDLES: tuple[str, ...] = (
-    "openai",
-    "OpenAIDevs",
-    "AnthropicAI",
-    "GoogleDeepMind",
-    "huggingface",
-    "LangChainAI",
-    "Replit",
-    "cursor_ai",
-)
-
-GROK_X_SCOUT_PLANS: tuple[dict[str, Any], ...] = (
-    {
-        "name": "vendor-posts",
-        "query": (
-            "Find the most important new X posts about AI model launches, API updates, release notes, "
-            "enterprise announcements, benchmarks, or open-source releases."
-        ),
-        "per_query_limit": 3,
-    },
-    {
-        "name": "builder-posts",
-        "query": (
-            "Find new X posts about agent workflows, coding tools, GitHub repo launches, MCP ecosystem updates, "
-            "or practical AI tooling that is genuinely useful to builders."
-        ),
-        "per_query_limit": 3,
-    },
-)
-
 SUPPLEMENTAL_BLOCKED_PATH_RE = re.compile(
     r"^/$|"
     r"^/(tag|tags|topic|topics|category|categories|author|authors|search)(/|$)|"
@@ -397,6 +368,30 @@ def _maybe_limit(items: list[str], limit: int) -> list[str]:
     if limit <= 0:
         return items
     return items[:limit]
+
+
+def _filter_history_muted_discoveries(articles: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], int]:
+    kept: list[dict[str, Any]] = []
+    filtered = 0
+    for article in articles:
+        if not isinstance(article, dict):
+            continue
+        source_kind = str(article.get("source_kind", "unknown") or "unknown").lower()
+        history_penalty = int(article.get("source_history_penalty", 0) or 0)
+        history_quality = int(article.get("source_history_quality_score", 50) or 50)
+        watchlist_hit = bool(article.get("watchlist_hit", False))
+        social_signal = bool(article.get("social_signal", False))
+        if (
+            history_penalty >= 8
+            and history_quality <= 35
+            and source_kind in {"search", "community"}
+            and not watchlist_hit
+            and not social_signal
+        ):
+            filtered += 1
+            continue
+        kept.append(article)
+    return kept, filtered
 
 
 def _project_path_from_env(default_relative_path: str, env_key: str) -> Path:
@@ -508,11 +503,6 @@ def _has_founder_grade_noise(text: str) -> bool:
     return any(keyword in lowered for keyword in FOUNDER_GRADE_NOISE_KEYWORDS)
 
 
-def _has_github_agent_signal(text: str) -> bool:
-    lowered = str(text or "").lower()
-    return any(keyword in lowered for keyword in GITHUB_AGENT_SIGNAL_KEYWORDS)
-
-
 def _build_search_article(
     *,
     url: str,
@@ -620,203 +610,68 @@ def _should_run_grok_scout(state: dict[str, Any], articles: list[dict[str, Any]]
 
 
 def _build_grok_scout_article(item: dict[str, Any], *, plan_name: str) -> dict[str, Any] | None:
-    url = str(item.get("url", "") or "").strip()
-    title = str(item.get("title", "") or "").strip()
-    snippet = " ".join(
-        part for part in [
-            str(item.get("summary", "") or "").strip(),
-            str(item.get("why_it_matters", "") or "").strip(),
-        ]
-        if part
+    return _build_grok_scout_article_impl(
+        item,
+        plan_name=plan_name,
+        is_blocked_url_fn=_is_blocked_url,
+        is_social_signal_url_fn=_is_social_signal_url,
+        is_founder_grade_candidate_fn=_is_founder_grade_candidate,
+        domain_from_url_fn=_domain_from_url,
+        extract_full_text_fn=_extract_full_text,
+        truncate_text_fn=_truncate_text,
     )
-    if not url or not title or _is_blocked_url(url):
-        return None
-
-    domain = _domain_from_url(url)
-    if domain == "github.com" or _is_social_signal_url(url):
-        return None
-    if not _is_founder_grade_candidate(title, snippet, url, domain):
-        return None
-
-    content = _extract_full_text(url)
-    if content and not _is_founder_grade_candidate(title, snippet, url, content[:1800]):
-        return None
-
-    source_kind, source_priority = classify_source_kind(
-        source=f"Grok Scout: {plan_name}",
-        domain=domain,
-        acquisition_quality="review",
-    )
-    return {
-        "title": title,
-        "url": url,
-        "source": f"Grok Scout: {plan_name}",
-        "snippet": _truncate_text(snippet or title, 500),
-        "content": _truncate_text(content or snippet, 4000),
-        "published": str(item.get("published_at", "") or "").strip(),
-        "fetched_at": datetime.now(timezone.utc).isoformat(),
-        "acquisition_quality": "review",
-        "source_kind": source_kind,
-        "source_priority": source_priority,
-        "community_signal_strength": 0,
-        "watchlist_hit": False,
-        "grok_scout": True,
-        "grok_scout_plan": plan_name,
-    }
 
 
 def _build_grok_x_scout_article(item: dict[str, Any], *, plan_name: str) -> dict[str, Any] | None:
-    post_url = str(item.get("post_url", "") or "").strip()
-    linked_url = str(item.get("linked_url", "") or "").strip()
-    title = str(item.get("title", "") or "").strip()
-    summary = str(item.get("summary", "") or "").strip()
-    why_it_matters = str(item.get("why_it_matters", "") or "").strip()
-    author_handle = str(item.get("author_handle", "") or "").strip().lstrip("@")
-    target_url = linked_url or post_url
-    if not target_url or not title or _is_blocked_url(target_url):
-        return None
-
-    if linked_url and _is_blocked_url(linked_url):
-        linked_url = ""
-        target_url = post_url
-
-    domain = _domain_from_url(target_url)
-    source_text = " ".join(part for part in [title, summary, why_it_matters, author_handle, linked_url, post_url] if part)
-    if not _is_founder_grade_candidate(title, summary, target_url, source_text):
-        return None
-
-    content = "\n\n".join(
-        part
-        for part in [
-            f"X post by @{author_handle}" if author_handle else "",
-            f"Summary: {summary}" if summary else "",
-            f"Why it matters: {why_it_matters}" if why_it_matters else "",
-            f"Original X post: {post_url}" if post_url and post_url != target_url else "",
-        ]
-        if part
+    return _build_grok_x_scout_article_impl(
+        item,
+        plan_name=plan_name,
+        is_blocked_url_fn=_is_blocked_url,
+        is_founder_grade_candidate_fn=_is_founder_grade_candidate,
+        domain_from_url_fn=_domain_from_url,
+        truncate_text_fn=_truncate_text,
     )
-
-    source_kind, source_priority = classify_source_kind(
-        source=f"Grok X Scout: {plan_name}",
-        domain=domain,
-        acquisition_quality="review" if linked_url else "manual",
-        social_signal=not bool(linked_url),
-    )
-    return {
-        "title": title,
-        "url": target_url,
-        "source": f"Grok X Scout: {plan_name}{f' | @{author_handle}' if author_handle else ''}",
-        "snippet": _truncate_text(" ".join(part for part in [summary, why_it_matters] if part), 500),
-        "content": _truncate_text(content, 4000),
-        "published": str(item.get("published_at", "") or "").strip(),
-        "fetched_at": datetime.now(timezone.utc).isoformat(),
-        "acquisition_quality": "review" if linked_url else "manual",
-        "source_kind": source_kind,
-        "source_priority": source_priority,
-        "community_signal_strength": 4,
-        "watchlist_hit": False,
-        "grok_x_scout": True,
-        "grok_x_scout_plan": plan_name,
-        "social_signal": not bool(linked_url),
-        "social_platform": "x",
-        "x_post_url": post_url,
-        "x_author_handle": author_handle,
-        "community_hint": post_url if post_url and post_url != target_url else "",
-    }
 
 
 def _run_grok_scout(state: dict[str, Any], raw_articles: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    if not _should_run_grok_scout(state, raw_articles):
-        logger.info("⏭️ Skip Grok scout vì source mix hiện tại đã đủ mạnh.")
-        return []
-
-    max_queries = grok_scout_max_queries(_runtime_config(state))
-    max_articles_total = grok_scout_max_articles(_runtime_config(state))
-    existing_urls = [str(article.get("url", "") or "").strip() for article in raw_articles if str(article.get("url", "") or "").strip()]
-    existing_titles = [str(article.get("title", "") or "").strip() for article in raw_articles if str(article.get("title", "") or "").strip()]
-
-    logger.info("🧠 Grok scout: source mix yếu, sẽ web search thêm tối đa %d query.", max_queries)
-    collected: list[dict[str, Any]] = []
-    for plan in GROK_SCOUT_SEARCH_PLANS[:max_queries]:
-        remaining = max_articles_total - len(collected)
-        if remaining <= 0:
-            break
-        result = scout_web_search_articles(
-            query=str(plan.get("query", "") or ""),
-            allowed_domains=list(plan.get("domains", []) or []),
-            existing_urls=existing_urls,
-            existing_titles=existing_titles,
-            max_articles=min(int(plan.get("per_query_limit", 2) or 2), remaining),
-        )
-        plan_name = str(plan.get("name", "search") or "search")
-        for item in result.get("articles", []) or []:
-            article = _build_grok_scout_article(item, plan_name=plan_name)
-            if not article:
-                continue
-            existing_urls.append(str(article.get("url", "") or ""))
-            existing_titles.append(str(article.get("title", "") or ""))
-            collected.append(article)
-        logger.info("   Grok scout[%s]: %d bài", plan_name, len(collected))
-
-    return collected[:max_articles_total]
+    return _run_grok_scout_impl(
+        should_run=_should_run_grok_scout(state, raw_articles),
+        raw_articles=raw_articles,
+        max_queries=grok_scout_max_queries(_runtime_config(state)),
+        max_articles_total=grok_scout_max_articles(_runtime_config(state)),
+        scout_web_search_articles_fn=scout_web_search_articles,
+        is_blocked_url_fn=_is_blocked_url,
+        is_social_signal_url_fn=_is_social_signal_url,
+        is_founder_grade_candidate_fn=_is_founder_grade_candidate,
+        domain_from_url_fn=_domain_from_url,
+        extract_full_text_fn=_extract_full_text,
+        truncate_text_fn=_truncate_text,
+        logger=logger,
+        plans=WEB_SCOUT_PLANS,
+    )
 
 
 def _runtime_x_scout_handles(state: dict[str, Any]) -> list[str]:
     configured = _cfg_list(state, "grok_x_scout_allowed_handles", "GROK_X_SCOUT_ALLOWED_HANDLES")
-    handles = configured or list(GROK_X_SCOUT_DEFAULT_HANDLES)
-    cleaned = []
-    seen: set[str] = set()
-    for handle in handles:
-        normalized = str(handle or "").strip().lstrip("@")
-        if not normalized or normalized.lower() in seen:
-            continue
-        seen.add(normalized.lower())
-        cleaned.append(normalized)
-    return cleaned[:10]
+    return _runtime_x_scout_handles_impl(configured_handles=configured, default_handles=DEFAULT_X_SCOUT_HANDLES)
 
 
 def _run_grok_x_scout(state: dict[str, Any], raw_articles: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    if not grok_x_scout_enabled(_runtime_config(state)):
-        return []
-
-    max_queries = grok_x_scout_max_queries(_runtime_config(state))
-    max_articles_total = grok_x_scout_max_articles(_runtime_config(state))
-    allowed_handles = _runtime_x_scout_handles(state)
-    excluded_handles = _cfg_list(state, "grok_x_scout_excluded_handles", "GROK_X_SCOUT_EXCLUDED_HANDLES")
-    existing_urls = [str(article.get("url", "") or "").strip() for article in raw_articles if str(article.get("url", "") or "").strip()]
-    existing_titles = [str(article.get("title", "") or "").strip() for article in raw_articles if str(article.get("title", "") or "").strip()]
-
-    logger.info(
-        "🧠 Grok X scout: searching X with up to %d query and %d handles.",
-        max_queries,
-        len(allowed_handles),
+    return _run_grok_x_scout_impl(
+        enabled=grok_x_scout_enabled(_runtime_config(state)),
+        raw_articles=raw_articles,
+        max_queries=grok_x_scout_max_queries(_runtime_config(state)),
+        max_articles_total=grok_x_scout_max_articles(_runtime_config(state)),
+        allowed_handles=_runtime_x_scout_handles(state),
+        excluded_handles=_cfg_list(state, "grok_x_scout_excluded_handles", "GROK_X_SCOUT_EXCLUDED_HANDLES"),
+        scout_x_posts_fn=scout_x_posts,
+        is_blocked_url_fn=_is_blocked_url,
+        is_founder_grade_candidate_fn=_is_founder_grade_candidate,
+        domain_from_url_fn=_domain_from_url,
+        truncate_text_fn=_truncate_text,
+        logger=logger,
+        plans=X_SCOUT_PLANS,
     )
-    collected: list[dict[str, Any]] = []
-    for plan in GROK_X_SCOUT_PLANS[:max_queries]:
-        remaining = max_articles_total - len(collected)
-        if remaining <= 0:
-            break
-        result = scout_x_posts(
-            query=str(plan.get("query", "") or ""),
-            allowed_x_handles=allowed_handles,
-            excluded_x_handles=excluded_handles,
-            existing_urls=existing_urls,
-            existing_titles=existing_titles,
-            max_posts=min(int(plan.get("per_query_limit", 2) or 2), remaining),
-        )
-        plan_name = str(plan.get("name", "x-search") or "x-search")
-        for item in result.get("posts", []) or []:
-            article = _build_grok_x_scout_article(item, plan_name=plan_name)
-            if not article:
-                continue
-            existing_urls.append(str(article.get("url", "") or ""))
-            if article.get("x_post_url"):
-                existing_urls.append(str(article.get("x_post_url", "") or ""))
-            existing_titles.append(str(article.get("title", "") or ""))
-            collected.append(article)
-        logger.info("   Grok X scout[%s]: %d bài", plan_name, len(collected))
-
-    return collected[:max_articles_total]
 
 
 def _http_get_text(url: str, timeout: int = 20) -> str:
@@ -971,28 +826,21 @@ def _build_social_signal_articles() -> list[dict[str, Any]]:
 
 
 def _github_headers() -> dict[str, str]:
-    headers = dict(REQUEST_HEADERS)
-    headers["Accept"] = "application/vnd.github+json"
-    headers["X-GitHub-Api-Version"] = "2022-11-28"
-    token = os.getenv("GITHUB_TOKEN", "").strip()
-    if token:
-        headers["Authorization"] = f"Bearer {token}"
-    return headers
+    from source_adapters.github_adapter import github_headers
+
+    return github_headers(request_headers=REQUEST_HEADERS, github_token=os.getenv("GITHUB_TOKEN", "").strip())
 
 
 def _github_get_json(path: str, *, params: dict[str, Any] | None = None) -> Any:
-    try:
-        response = requests.get(
-            f"https://api.github.com{path}",
-            headers=_github_headers(),
-            params=params or None,
-            timeout=20,
-        )
-        response.raise_for_status()
-        return response.json()
-    except Exception as exc:
-        logger.warning("GitHub API request failed for %s: %s", path, exc)
-        return None
+    from source_adapters.github_adapter import github_get_json
+
+    return github_get_json(
+        path,
+        request_headers=REQUEST_HEADERS,
+        github_token=os.getenv("GITHUB_TOKEN", "").strip(),
+        params=params,
+        logger=logger,
+    )
 
 
 def _truncate_text(value: str, limit: int) -> str:
@@ -1001,179 +849,29 @@ def _truncate_text(value: str, limit: int) -> str:
         return text
     return text[: limit - 1].rstrip() + "…"
 
-
-def _normalize_facebook_permalink(url: str) -> str:
-    raw = str(url or "").strip()
-    if not raw:
-        return ""
-    raw = raw.replace("m.facebook.com", "www.facebook.com").replace("mbasic.facebook.com", "www.facebook.com")
-    if "/groups/" in raw and ("/posts/" in raw or "/videos/" in raw):
-        raw = raw.split("?", 1)[0]
-    raw = raw.split("?__cft__=", 1)[0]
-    raw = raw.split("&__cft__=", 1)[0]
-    raw = raw.split("&__tn__=", 1)[0]
-    raw = raw.split("?__tn__=", 1)[0]
-    return raw
-
-
-def _extract_facebook_permalink(links: list[str]) -> str:
-    preferred_patterns = (
-        "/posts/",
-        "/groups/",
-        "/permalink.php",
-        "/share/p/",
-        "/videos/",
-    )
-    normalized_links = [_normalize_facebook_permalink(link) for link in links if str(link or "").strip()]
-    for pattern in preferred_patterns:
-        for link in normalized_links:
-            if pattern == "/groups/" and "/posts/" not in link:
-                continue
-            if pattern in link:
-                return link
-    return normalized_links[0] if normalized_links else ""
-
-
-def _looks_like_interaction_line(text: str) -> bool:
-    lowered = str(text or "").strip().lower()
-    return lowered in {
-        "thích",
-        "bình luận",
-        "chia sẻ",
-        "like",
-        "comment",
-        "share",
-    } or lowered.startswith("tất cả cảm xúc")
-
-
-def _is_loaded_facebook_payload(payload: dict[str, Any]) -> bool:
-    text = str(payload.get("text", "") or "").strip()
-    if not text:
-        return False
-    if FACEBOOK_ARTICLE_LOADING_RE.search(text):
-        return False
-    return True
-
-
-def _clean_facebook_lines(lines: list[str]) -> list[str]:
-    cleaned: list[str] = []
-    for line in lines:
-        value = str(line or "").strip()
-        if not value:
-            continue
-        if FACEBOOK_METADATA_LINE_RE.fullmatch(value):
-            continue
-        if FACEBOOK_SEE_MORE_RE.fullmatch(value):
-            continue
-        cleaned.append(value)
-    return cleaned
-
-
-def _detect_facebook_content_style(title: str, content: str) -> str:
-    combined = " ".join(part for part in [title, content] if part)
-    lowered = combined.lower()
-    if FACEBOOK_PROMO_RE.search(combined):
-        return "promo"
-    if FACEBOOK_SPECULATION_RE.search(combined):
-        return "speculation"
-    if FACEBOOK_MODEL_COMPARE_RE.search(combined):
-        return "benchmark"
-    if FACEBOOK_CASE_STUDY_RE.search(combined):
-        if any(keyword in lowered for keyword in ("workflow", "playbook", "mcp", "claude code", "quy trình")):
-            return "workflow"
-        return "case_study"
-    if FACEBOOK_NEWS_RECAP_RE.search(combined):
-        return "news_recap"
-    if any(keyword in lowered for keyword in ("mình nghĩ", "quan điểm", "ý kiến", "theo mình")):
-        return "opinion"
-    return "case_study" if len(content) >= 700 else "workflow" if "tool" in lowered else "news_recap"
-
-
-def _score_facebook_boss_style(title: str, content: str, *, content_style: str) -> int:
-    combined = " ".join(part for part in [title, content] if part)
-    lowered = combined.lower()
-    score = 30
-    score += min(16, len(content) // 180)
-    if any(char.isdigit() for char in combined):
-        score += 8
-    if " vs " in lowered or " so sánh " in lowered:
-        score += 10
-    if any(keyword in lowered for keyword in ("openai", "anthropic", "claude", "gpt", "gemini", "minimax", "grok")):
-        score += 10
-    if any(keyword in lowered for keyword in ("benchmark", "workflow", "case study", "thực chiến", "production", "chi phí")):
-        score += 10
-    if any(keyword in lowered for keyword in ("bài 1", "bài test", "test 1", "kết quả", "yêu cầu", "module", "codebase")):
-        score += 8
-
-    style_bonus = {
-        "benchmark": 26,
-        "case_study": 18,
-        "workflow": 16,
-        "news_recap": 8,
-        "opinion": 2,
-        "speculation": -18,
-        "promo": -34,
-    }
-    score += style_bonus.get(content_style, 0)
-    if len(content.strip()) < 180:
-        score -= 18
-    return max(0, min(100, score))
-
-
-def _score_facebook_authority(
-    *,
-    target: dict[str, Any],
-    author: str,
-    source_type: str,
-) -> int:
-    ai_source_score = int(target.get("ai_source_score", 0) or 0)
-    discovery_origin = str(target.get("discovery_origin", "") or "").strip().lower()
-    base = {
-        "group": 42,
-        "page": 52,
-        "profile": 58,
-    }.get(source_type, 45)
-    if discovery_origin == "manual":
-        base += 14
-    elif discovery_origin == "followed":
-        base += 8
-    elif discovery_origin == "joined":
-        base += 5
-    if "ai" in author.lower():
-        base += 6
-    return max(0, min(100, base + min(28, ai_source_score // 2)))
-
-
-def _facebook_published_hint_rank(value: str) -> int:
-    raw = str(value or "").strip().lower()
-    if not raw:
-        return 40
-    if raw in {"vừa xong", "just now"}:
-        return 100
-    if raw in {"hôm qua", "hom qua", "yesterday"}:
-        return 76
-    match = re.match(
-        r"^(?P<value>\d+)\s*(?P<unit>phút|phut|minute|minutes|min|mins|giờ|gio|hour|hours|hr|hrs|ngày|ngay|day|days|tuần|tuan|week|weeks|tháng|thang|month|months|năm|nam|year|years)\b",
-        raw,
-        re.IGNORECASE,
-    )
-    if not match:
-        return 35
-    amount = int(match.group("value"))
-    unit = match.group("unit").lower()
-    if unit in {"phút", "phut", "minute", "minutes", "min", "mins"}:
-        return max(88, 99 - amount)
-    if unit in {"giờ", "gio", "hour", "hours", "hr", "hrs"}:
-        return max(70, 95 - amount)
-    if unit in {"ngày", "ngay", "day", "days"}:
-        return max(48, 72 - (amount * 4))
-    if unit in {"tuần", "tuan", "week", "weeks"}:
-        return max(10, 32 - (amount * 6))
-    if unit in {"tháng", "thang", "month", "months"}:
-        return max(0, 6 - amount)
-    if unit in {"năm", "nam", "year", "years"}:
-        return 0
-    return 35
+_normalize_facebook_permalink = _facebook_adapter.normalize_facebook_permalink
+_extract_facebook_permalink = _facebook_adapter.extract_facebook_permalink
+_looks_like_interaction_line = _facebook_adapter.looks_like_interaction_line
+_is_loaded_facebook_payload = _facebook_adapter.is_loaded_facebook_payload
+_clean_facebook_lines = _facebook_adapter.clean_facebook_lines
+_detect_facebook_content_style = _facebook_adapter.detect_facebook_content_style
+_score_facebook_boss_style = _facebook_adapter.score_facebook_boss_style
+_score_facebook_authority = _facebook_adapter.score_facebook_authority
+_facebook_published_hint_rank = _facebook_adapter.facebook_published_hint_rank
+_normalize_facebook_source_url = _facebook_adapter.normalize_facebook_source_url
+_infer_facebook_source_type = _facebook_adapter.infer_facebook_source_type
+_score_facebook_source = _facebook_adapter.score_facebook_source
+_facebook_source_status = _facebook_adapter.facebook_source_status
+_normalize_facebook_source_entry = _facebook_adapter.normalize_facebook_source_entry
+_clean_facebook_discovery_label = _facebook_adapter.clean_facebook_discovery_label
+_extract_facebook_anchor_candidates = _facebook_adapter.extract_facebook_anchor_candidates
+_is_real_group_source_url = _facebook_adapter.is_real_group_source_url
+_is_profile_like_source_url = _facebook_adapter.is_profile_like_source_url
+_merge_facebook_source_entries = _facebook_adapter.merge_facebook_source_entries
+_discover_group_sources = _facebook_adapter.discover_group_sources
+_discover_followed_page_sources = _facebook_adapter.discover_followed_page_sources
+_discover_followed_profile_sources = _facebook_adapter.discover_followed_profile_sources
+_try_set_facebook_newest_first = _facebook_adapter.try_set_facebook_newest_first
 
 
 def _facebook_target_file() -> Path:
@@ -1226,160 +924,24 @@ def _facebook_force_newest_first(state: dict[str, Any]) -> bool:
 
 
 def _utc_now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return _facebook_adapter.utc_now_iso()
 
 
 def _read_json_file(path: Path) -> Any:
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
-        return None
+    return _facebook_adapter.read_json_file(path)
 
 
 def _write_json_file(path: Path, payload: Any) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-
-
-def _normalize_facebook_source_url(url: str) -> str:
-    normalized = _normalize_facebook_permalink(url)
-    if not normalized:
-        return ""
-    try:
-        parsed = urlparse(normalized)
-    except Exception:
-        return normalized
-    path = (parsed.path or "/").rstrip("/")
-    segments = [segment for segment in path.split("/") if segment]
-    if segments[:1] == ["groups"] and len(segments) >= 2:
-        path = f"/groups/{segments[1]}"
-    elif segments[:1] == ["profile.php"]:
-        path = "/profile.php"
-    elif segments:
-        path = f"/{segments[0]}"
-    else:
-        path = "/"
-    if path != "/":
-        path = f"{path}/"
-    if path == "/profile.php/" and parsed.query:
-        return f"https://www.facebook.com/profile.php?{parsed.query}"
-    return f"https://www.facebook.com{path}"
-
-
-def _infer_facebook_source_type(url: str) -> str:
-    normalized = _normalize_facebook_source_url(url)
-    if not normalized:
-        return "group"
-    lowered = normalized.lower()
-    if "/groups/" in lowered:
-        return "group"
-    if "profile.php" in lowered:
-        return "profile"
-    return "profile"
-
-
-def _score_facebook_source(label: str, url: str, *, source_type: str, description: str = "") -> int:
-    text = " ".join(part for part in [label, description, url] if part).lower()
-    if not text:
-        return 0
-    score = 10
-    for keyword, weight in FACEBOOK_DISCOVERY_KEYWORDS.items():
-        if keyword in text:
-            score += weight
-    if source_type == "group":
-        score += 6
-    elif source_type == "page":
-        score += 10
-    elif source_type == "profile":
-        score += 12
-    if re.search(r"\bai\b", text):
-        score += 18
-    if "chat gpt" in text or "chatgpt" in text:
-        score += 18
-    if "openclaw" in text:
-        score += 22
-    if source_type == "group" and any(
-        keyword in text for keyword in ("ai", "chatgpt", "chat gpt", "openclaw", "claude", "llm", "workflow", "automation")
-    ):
-        score += 12
-    if "community" in text or "cộng đồng" in text:
-        score += 6
-    if FACEBOOK_SOURCE_BLOCKLIST_RE.search(text):
-        score -= 35
-    if not any(keyword in text for keyword in FACEBOOK_DISCOVERY_KEYWORDS):
-        score = min(score, 45)
-    return max(0, min(100, score))
-
-
-def _facebook_source_status(*, ai_source_score: int, discovery_origin: str) -> str:
-    if discovery_origin == "manual":
-        return "auto_active"
-    if ai_source_score >= 70:
-        return "auto_active"
-    if ai_source_score >= 50:
-        return "candidate"
-    return "ignored"
-
-
-def _normalize_facebook_source_entry(entry: dict[str, Any]) -> dict[str, Any] | None:
-    url = _normalize_facebook_source_url(str(entry.get("url", "") or ""))
-    label = str(entry.get("label", "") or "").strip()
-    if not url or not label or FACEBOOK_GENERIC_LABEL_RE.fullmatch(label):
-        return None
-    source_type = str(entry.get("source_type", "") or "").strip().lower() or _infer_facebook_source_type(url)
-    discovery_origin = str(entry.get("discovery_origin", "") or "").strip().lower() or "manual"
-    ai_source_score = int(entry.get("ai_source_score", 0) or _score_facebook_source(label, url, source_type=source_type))
-    status = str(entry.get("status", "") or "").strip().lower() or _facebook_source_status(
-        ai_source_score=ai_source_score,
-        discovery_origin=discovery_origin,
-    )
-    return {
-        "label": label,
-        "url": url,
-        "source_type": source_type,
-        "discovery_origin": discovery_origin,
-        "ai_source_score": max(0, min(100, ai_source_score)),
-        "status": status,
-        "last_seen_at": str(entry.get("last_seen_at", "") or _utc_now_iso()),
-        "last_crawled_at": str(entry.get("last_crawled_at", "") or ""),
-    }
+    _facebook_adapter.write_json_file(path, payload)
 
 
 def _load_facebook_auto_targets() -> list[dict[str, str]]:
     path = _facebook_target_file()
-    if not path.exists():
-        return []
-
-    targets: list[dict[str, str]] = []
     try:
-        lines = path.read_text(encoding="utf-8").splitlines()
+        return _facebook_adapter.load_facebook_auto_targets(path, domain_from_url_fn=_domain_from_url)
     except Exception as exc:
         logger.warning("Facebook auto targets read failed: %s", exc)
         return []
-
-    for raw_line in lines:
-        line = raw_line.strip()
-        if not line or line.startswith("#"):
-            continue
-        parts = [part.strip() for part in line.split("|")]
-        label = parts[0] if len(parts) >= 2 else ""
-        url = parts[1] if len(parts) >= 2 else parts[0]
-        source_type = parts[2].strip().lower() if len(parts) >= 3 else _infer_facebook_source_type(url)
-        if not url:
-            continue
-        entry = _normalize_facebook_source_entry(
-            {
-                "label": label or _domain_from_url(url) or "Facebook target",
-                "url": url,
-                "source_type": source_type,
-                "discovery_origin": "manual",
-                "ai_source_score": 100,
-                "status": "auto_active",
-            }
-        )
-        if entry:
-            targets.append(entry)
-    return targets
 
 
 def _facebook_auto_enabled(state: dict[str, Any]) -> bool:
@@ -1387,331 +949,41 @@ def _facebook_auto_enabled(state: dict[str, Any]) -> bool:
 
 
 def _facebook_discovery_cache_is_fresh(path: Path, *, refresh_hours: int) -> bool:
-    if refresh_hours <= 0 or not path.exists():
-        return False
-    if path.stat().st_size <= 4:
-        return False
-    modified_at = datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc)
-    return (datetime.now(timezone.utc) - modified_at).total_seconds() <= refresh_hours * 3600
+    return _facebook_adapter.facebook_discovery_cache_is_fresh(path, refresh_hours=refresh_hours)
 
 
 def _load_facebook_discovery_cache() -> list[dict[str, Any]]:
-    path = _facebook_discovery_cache_file()
-    payload = _read_json_file(path)
-    if isinstance(payload, dict):
-        payload = payload.get("sources", [])
-    if not isinstance(payload, list):
-        return []
-    items: list[dict[str, Any]] = []
-    for entry in payload:
-        if not isinstance(entry, dict):
-            continue
-        normalized = _normalize_facebook_source_entry(entry)
-        if normalized:
-            items.append(normalized)
-    return items
+    return _facebook_adapter.load_facebook_discovery_cache(_facebook_discovery_cache_file())
 
 
 def _save_facebook_discovery_cache(sources: list[dict[str, Any]]) -> None:
-    path = _facebook_discovery_cache_file()
-    _write_json_file(path, sources)
-
-
-def _clean_facebook_discovery_label(value: str) -> str:
-    label = " ".join(str(value or "").split()).strip(" |·")
-    label = re.sub(r"\s*Lần hoạt động gần nhất:.*$", "", label, flags=re.IGNORECASE).strip(" |·")
-    if not label or len(label) < 3 or len(label) > 140:
-        return ""
-    if FACEBOOK_GENERIC_LABEL_RE.fullmatch(label):
-        return ""
-    return label
-
-
-def _extract_facebook_anchor_candidates(page: Any) -> list[dict[str, str]]:
-    try:
-        anchors = page.locator("a[href]").evaluate_all(
-            """(nodes) => nodes.map((node) => ({
-                href: node.href || "",
-                text: (node.innerText || "").trim(),
-                aria: (node.getAttribute("aria-label") || "").trim(),
-                title: (node.getAttribute("title") || "").trim()
-            }))"""
-        )
-    except Exception:
-        return []
-    cleaned: list[dict[str, str]] = []
-    for item in anchors:
-        if not isinstance(item, dict):
-            continue
-        href = str(item.get("href", "") or "").strip()
-        if not href or "facebook.com" not in href.lower():
-            continue
-        cleaned.append(
-            {
-                "href": href,
-                "label": _clean_facebook_discovery_label(
-                    str(item.get("text", "") or "")
-                    or str(item.get("aria", "") or "")
-                    or str(item.get("title", "") or "")
-                ),
-            }
-        )
-    return cleaned
-
-
-def _is_real_group_source_url(url: str) -> bool:
-    lowered = str(url or "").lower()
-    if "/groups/" not in lowered:
-        return False
-    path = urlparse(url).path.strip("/").split("/")
-    if len(path) < 2:
-        return False
-    return path[1] not in {
-        "feed",
-        "discover",
-        "notifications",
-        "search",
-        "suggested_groups",
-        "you_should_join",
-    }
-
-
-def _is_profile_like_source_url(url: str) -> bool:
-    normalized = _normalize_facebook_source_url(url)
-    if not normalized:
-        return False
-    parsed = urlparse(normalized)
-    if parsed.path == "/profile.php":
-        return True
-    segments = [segment for segment in parsed.path.strip("/").split("/") if segment]
-    if len(segments) != 1:
-        return False
-    return segments[0].lower() not in FACEBOOK_PROFILE_RESERVED_SEGMENTS
-
-
-def _merge_facebook_source_entries(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    merged: dict[str, dict[str, Any]] = {}
-    for entry in entries:
-        normalized = _normalize_facebook_source_entry(entry)
-        if not normalized:
-            continue
-        key = str(normalized.get("url", "") or "")
-        existing = merged.get(key)
-        if not existing:
-            merged[key] = normalized
-            continue
-        if int(normalized.get("ai_source_score", 0) or 0) > int(existing.get("ai_source_score", 0) or 0):
-            existing.update(normalized)
-        else:
-            existing["last_seen_at"] = normalized.get("last_seen_at", existing.get("last_seen_at", ""))
-    return sorted(
-        merged.values(),
-        key=lambda item: (
-            str(item.get("status", "") or "") != "auto_active",
-            -(int(item.get("ai_source_score", 0) or 0)),
-            str(item.get("label", "") or "").lower(),
-        ),
-    )
-
-
-def _discover_group_sources(page: Any) -> list[dict[str, Any]]:
-    entries: list[dict[str, Any]] = []
-    for url in ("https://www.facebook.com/groups/feed/", "https://www.facebook.com/groups/"):
-        try:
-            page.goto(url, wait_until="domcontentloaded", timeout=60000)
-            page.wait_for_timeout(2500)
-        except Exception:
-            continue
-        for item in _extract_facebook_anchor_candidates(page):
-            href = _normalize_facebook_source_url(item.get("href", ""))
-            if not href or not _is_real_group_source_url(href):
-                continue
-            label = item.get("label", "")
-            score = _score_facebook_source(label, href, source_type="group")
-            entries.append(
-                {
-                    "label": label,
-                    "url": href,
-                    "source_type": "group",
-                    "discovery_origin": "joined",
-                    "ai_source_score": score,
-                    "status": _facebook_source_status(ai_source_score=score, discovery_origin="joined"),
-                    "last_seen_at": _utc_now_iso(),
-                    "last_crawled_at": "",
-                }
-            )
-    return _merge_facebook_source_entries(entries)
-
-
-def _discover_followed_page_sources(page: Any) -> list[dict[str, Any]]:
-    entries: list[dict[str, Any]] = []
-    try:
-        page.goto("https://www.facebook.com/pages/?category=liked&ref=bookmarks", wait_until="domcontentloaded", timeout=60000)
-        page.wait_for_timeout(2500)
-    except Exception:
-        return []
-
-    for item in _extract_facebook_anchor_candidates(page):
-        href = _normalize_facebook_source_url(item.get("href", ""))
-        label = item.get("label", "")
-        if not href or not label or "/groups/" in href.lower():
-            continue
-        if not _is_profile_like_source_url(href):
-            continue
-        score = _score_facebook_source(label, href, source_type="page")
-        entries.append(
-            {
-                "label": label,
-                "url": href,
-                "source_type": "page",
-                "discovery_origin": "followed",
-                "ai_source_score": score,
-                "status": _facebook_source_status(ai_source_score=score, discovery_origin="followed"),
-                "last_seen_at": _utc_now_iso(),
-                "last_crawled_at": "",
-            }
-        )
-    return _merge_facebook_source_entries(entries)
-
-
-def _discover_followed_profile_sources(page: Any) -> list[dict[str, Any]]:
-    entries: list[dict[str, Any]] = []
-    for url in ("https://www.facebook.com/following/", "https://www.facebook.com/bookmarks/"):
-        try:
-            page.goto(url, wait_until="domcontentloaded", timeout=60000)
-            page.wait_for_timeout(2500)
-        except Exception:
-            continue
-        for item in _extract_facebook_anchor_candidates(page):
-            href = _normalize_facebook_source_url(item.get("href", ""))
-            label = item.get("label", "")
-            if not href or not label or not _is_profile_like_source_url(href):
-                continue
-            score = _score_facebook_source(label, href, source_type="profile")
-            if score < 50:
-                continue
-            entries.append(
-                {
-                    "label": label,
-                    "url": href,
-                    "source_type": "profile",
-                    "discovery_origin": "followed",
-                    "ai_source_score": score,
-                    "status": _facebook_source_status(ai_source_score=score, discovery_origin="followed"),
-                    "last_seen_at": _utc_now_iso(),
-                    "last_crawled_at": "",
-                }
-            )
-    return _merge_facebook_source_entries(entries)
+    _facebook_adapter.save_facebook_discovery_cache(_facebook_discovery_cache_file(), sources)
 
 
 def _refresh_facebook_discovery_cache(*, headless: bool, allow_profiles: bool) -> list[dict[str, Any]]:
-    try:
-        from playwright.sync_api import sync_playwright
-    except Exception as exc:
-        logger.warning("Playwright unavailable for Facebook discovery: %s", exc)
-        return []
-
-    chrome_executable = _facebook_chrome_executable()
-    storage_state_file = _facebook_storage_state_file()
-    if not storage_state_file.exists():
-        logger.warning("Facebook discovery skipped because storage state is missing: %s", storage_state_file)
-        return []
-
-    try:
-        with sync_playwright() as playwright:
-            browser = playwright.chromium.launch(
-                executable_path=chrome_executable,
-                headless=headless,
-                args=["--disable-blink-features=AutomationControlled"],
-            )
-            context = browser.new_context(
-                viewport={"width": 1280, "height": 2200},
-                storage_state=str(storage_state_file),
-            )
-            page = context.new_page()
-            try:
-                discovered = []
-                discovered.extend(_discover_group_sources(page))
-                discovered.extend(_discover_followed_page_sources(page))
-                if allow_profiles:
-                    discovered.extend(_discover_followed_profile_sources(page))
-                return _merge_facebook_source_entries(discovered)
-            finally:
-                with suppress(Exception):
-                    context.close()
-                with suppress(Exception):
-                    browser.close()
-    except Exception as exc:
-        logger.warning("Facebook discovery failed: %s", exc)
-        return []
+    return _facebook_adapter.refresh_facebook_discovery_cache(
+        headless=headless,
+        allow_profiles=allow_profiles,
+        chrome_executable=_facebook_chrome_executable(),
+        storage_state_file=_facebook_storage_state_file(),
+        logger=logger,
+    )
 
 
 def _resolve_facebook_source_registry(state: dict[str, Any], *, headless: bool) -> dict[str, list[dict[str, Any]]]:
-    manual_sources = _load_facebook_auto_targets()
-    discovered_sources: list[dict[str, Any]] = []
-    auto_active_sources: list[dict[str, Any]] = list(manual_sources)
-    candidate_sources: list[dict[str, Any]] = []
-
-    if _facebook_discovery_enabled(state):
-        cache_file = _facebook_discovery_cache_file()
-        refresh_hours = _facebook_discovery_refresh_hours(state)
-        allow_profiles = _facebook_allow_profile_sources(state)
-        if _facebook_discovery_cache_is_fresh(cache_file, refresh_hours=refresh_hours):
-            discovered_sources = _load_facebook_discovery_cache()
-        else:
-            discovered_sources = _refresh_facebook_discovery_cache(headless=headless, allow_profiles=allow_profiles)
-            if discovered_sources:
-                _save_facebook_discovery_cache(discovered_sources)
-        discovered_sources = _merge_facebook_source_entries(discovered_sources)
-        candidate_sources = [
-            source for source in discovered_sources
-            if str(source.get("status", "") or "").lower() == "candidate"
-        ][: _facebook_discovery_max_candidates_per_run(state)]
-        discovered_auto_active = [
-            source for source in discovered_sources
-            if str(source.get("status", "") or "").lower() == "auto_active"
-        ]
-        remaining_slots = max(0, _facebook_discovery_max_active_sources(state) - len(manual_sources))
-        seen_urls = {str(item.get("url", "") or "") for item in manual_sources}
-        for source in discovered_auto_active:
-            url = str(source.get("url", "") or "")
-            if not url or url in seen_urls:
-                continue
-            auto_active_sources.append(source)
-            seen_urls.add(url)
-            if remaining_slots and len(auto_active_sources) >= len(manual_sources) + remaining_slots:
-                break
-
-    return {
-        "manual_sources": manual_sources,
-        "discovered_sources": discovered_sources,
-        "auto_active_sources": auto_active_sources,
-        "candidate_sources": candidate_sources,
-    }
-
-
-def _try_set_facebook_newest_first(page: Any) -> str:
-    sort_mode = "default_fallback"
-    try:
-        button = page.get_by_role("button", name=FACEBOOK_GROUP_SORT_BUTTON_RE)
-        if button.count() <= 0:
-            return sort_mode
-        button.first.click(timeout=4000)
-        page.wait_for_timeout(800)
-        for pattern in (FACEBOOK_NEWEST_OPTION_RE, FACEBOOK_RECENT_ACTIVITY_OPTION_RE):
-            option = page.get_by_text(pattern)
-            if option.count() <= 0:
-                continue
-            option.first.click(timeout=4000)
-            page.wait_for_timeout(1800)
-            if pattern is FACEBOOK_NEWEST_OPTION_RE:
-                return "newest"
-            sort_mode = "recent_activity"
-            break
-    except Exception:
-        return "default_fallback"
-    return sort_mode
+    return _facebook_adapter.resolve_facebook_source_registry(
+        manual_sources=_load_facebook_auto_targets(),
+        discovery_enabled=_facebook_discovery_enabled(state),
+        cache_file=_facebook_discovery_cache_file(),
+        refresh_hours=_facebook_discovery_refresh_hours(state),
+        allow_profiles=_facebook_allow_profile_sources(state),
+        max_candidates_per_run=_facebook_discovery_max_candidates_per_run(state),
+        max_active_sources=_facebook_discovery_max_active_sources(state),
+        headless=headless,
+        load_cache_fn=_load_facebook_discovery_cache,
+        refresh_cache_fn=_refresh_facebook_discovery_cache,
+        save_cache_fn=_save_facebook_discovery_cache,
+    )
 
 
 def _scrape_facebook_target_payloads(
@@ -1721,78 +993,15 @@ def _scrape_facebook_target_payloads(
     headless: bool,
     force_newest_first: bool = True,
 ) -> list[dict[str, Any]]:
-    try:
-        from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
-        from playwright.sync_api import sync_playwright
-    except Exception as exc:
-        logger.warning("Playwright unavailable for Facebook auto adapter: %s", exc)
-        return []
-
-    chrome_executable = _facebook_chrome_executable()
-    storage_state_file = _facebook_storage_state_file()
-
-    try:
-        with sync_playwright() as playwright:
-            browser = playwright.chromium.launch(
-                executable_path=chrome_executable,
-                headless=headless,
-                args=["--disable-blink-features=AutomationControlled"],
-            )
-            context_kwargs: dict[str, Any] = {
-                "viewport": {"width": 1280, "height": 2200},
-            }
-            if storage_state_file.exists():
-                context_kwargs["storage_state"] = str(storage_state_file)
-            context = browser.new_context(**context_kwargs)
-            page = context.new_page()
-            payloads: list[dict[str, Any]] = []
-            try:
-                page.goto(str(target.get("url", "") or ""), wait_until="domcontentloaded", timeout=60000)
-                page.wait_for_timeout(3500)
-                if "/login" in page.url or page.locator('input[name="email"]').count() > 0:
-                    logger.warning("Facebook auto target requires login session: %s", target.get("url", ""))
-                    return []
-                sort_mode = "default_fallback"
-                if force_newest_first:
-                    sort_mode = _try_set_facebook_newest_first(page)
-
-                payloads = []
-                desired_payloads = max(2, posts_per_target * 2)
-                for _ in range(8):
-                    raw_payloads = page.locator('div[role="article"]').evaluate_all(
-                        """(nodes) => nodes.map((node) => {
-                            const text = (node.innerText || "").trim();
-                            const links = Array.from(node.querySelectorAll('a[href]'))
-                              .map((a) => a.href)
-                              .filter(Boolean);
-                            return { text, links };
-                        })"""
-                    )
-                    payloads = [
-                        {
-                            **payload,
-                            "facebook_sort_mode": sort_mode,
-                        }
-                        for payload in raw_payloads
-                        if isinstance(payload, dict) and _is_loaded_facebook_payload(payload)
-                    ]
-                    if len(payloads) >= desired_payloads:
-                        break
-                    page.mouse.wheel(0, 2200)
-                    page.wait_for_timeout(1200)
-            except PlaywrightTimeoutError:
-                logger.warning("Facebook auto target timed out: %s", target.get("url", ""))
-                return []
-            finally:
-                with suppress(Exception):
-                    context.close()
-                with suppress(Exception):
-                    browser.close()
-    except Exception as exc:
-        logger.warning("Facebook auto adapter failed for %s: %s", target.get("url", ""), exc)
-        return []
-
-    return [payload for payload in payloads if isinstance(payload, dict)][: max(1, posts_per_target * 3)]
+    return _facebook_adapter.scrape_facebook_target_payloads(
+        target=target,
+        posts_per_target=posts_per_target,
+        headless=headless,
+        force_newest_first=force_newest_first,
+        chrome_executable=_facebook_chrome_executable(),
+        storage_state_file=_facebook_storage_state_file(),
+        logger=logger,
+    )
 
 
 def _build_facebook_auto_article(
@@ -1800,88 +1009,12 @@ def _build_facebook_auto_article(
     *,
     target: dict[str, str],
 ) -> dict[str, Any] | None:
-    text = str(payload.get("text", "") or "").strip()
-    links = [str(item).strip() for item in payload.get("links", []) if str(item).strip()]
-    if not text or len(text) < 60:
-        return None
-    if FACEBOOK_ARTICLE_SKIP_RE.search(text):
-        return None
-
-    lines = _clean_facebook_lines([line.strip() for line in text.splitlines() if line.strip()])
-    if not lines:
-        return None
-
-    author = lines[0]
-    published_label = ""
-    content_lines: list[str] = []
-    for line in lines[1:]:
-        if _looks_like_interaction_line(line):
-            break
-        if FACEBOOK_TIME_HINT_RE.search(line):
-            if not published_label:
-                published_label = line
-            continue
-        if FACEBOOK_METADATA_LINE_RE.fullmatch(line):
-            continue
-        if FACEBOOK_SEE_MORE_RE.fullmatch(line):
-            continue
-        if re.fullmatch(r"\d+", line):
-            continue
-        content_lines.append(line)
-    content_text = "\n".join(content_lines).strip()
-    if not content_text or len(content_text) < 80:
-        return None
-    if not _is_founder_grade_candidate(content_text[:180], content_text[:600], " ".join(links), target.get("label", "")):
-        return None
-
-    permalink = _extract_facebook_permalink(links)
-    if not permalink:
-        return None
-
-    title = _truncate_text(content_lines[0] if content_lines else content_text, 160)
-    snippet = _truncate_text(content_text.replace("\n", " "), 500)
-    content = _truncate_text(content_text, 4000)
-    source_type = str(target.get("source_type", "") or _infer_facebook_source_type(str(target.get("url", "") or ""))).strip().lower() or "group"
-    discovery_origin = str(target.get("discovery_origin", "") or "manual").strip().lower()
-    content_style = _detect_facebook_content_style(title, content)
-    boss_style_score = _score_facebook_boss_style(title, content, content_style=content_style)
-    authority_score = _score_facebook_authority(target=target, author=author, source_type=source_type)
-    source = f"Facebook Auto | {target.get('label', 'Facebook target')}"
-    if author and author.lower() != str(target.get("label", "") or "").strip().lower():
-        source = f"{source} | {author}"
-
-    return {
-        "title": title,
-        "url": permalink,
-        "source": source,
-        "snippet": snippet,
-        "content": content,
-        "published": "",
-        "published_hint": published_label,
-        "published_hint_raw": published_label,
-        "fetched_at": datetime.now(timezone.utc).isoformat(),
-        "acquisition_quality": "auto_browser",
-        "source_verified": False,
-        "social_signal": True,
-        "social_platform": "facebook",
-        "social_author": author,
-        "social_group": str(target.get("label", "") or "").strip(),
-        "delivery_lane_hint": "facebook_topic",
-        "community_reactions": "",
-        "source_kind": "community",
-        "source_priority": 76,
-        "community_signal_strength": 3,
-        "watchlist_hit": False,
-        "facebook_auto": True,
-        "facebook_source_type": source_type,
-        "facebook_discovery_origin": discovery_origin,
-        "facebook_sort_mode": str(payload.get("facebook_sort_mode", "") or "default_fallback"),
-        "facebook_content_style": content_style,
-        "facebook_boss_style_score": boss_style_score,
-        "facebook_authority_score": authority_score,
-        "facebook_ai_source_score": int(target.get("ai_source_score", 0) or 0),
-        "post_age_hours": None,
-    }
+    return _facebook_adapter.build_facebook_auto_article(
+        payload,
+        target=target,
+        is_founder_grade_candidate_fn=_is_founder_grade_candidate,
+        truncate_text_fn=_truncate_text,
+    )
 
 
 def _build_facebook_auto_articles(
@@ -1889,110 +1022,37 @@ def _build_facebook_auto_articles(
     *,
     targets: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
-    if not _facebook_auto_enabled(state):
-        return []
-
-    targets = list(targets or _load_facebook_auto_targets())
-    if not targets:
-        logger.info("⏭️ Facebook auto bật nhưng chưa có target nào.")
-        return []
-
-    posts_per_target = _cfg_int(state, "facebook_auto_posts_per_target", "FACEBOOK_AUTO_POSTS_PER_TARGET", 2)
-    headless = _cfg_bool(state, "facebook_auto_headless", "FACEBOOK_AUTO_HEADLESS", True)
-    max_targets = _cfg_int(state, "facebook_auto_max_targets", "FACEBOOK_AUTO_MAX_TARGETS", 4)
-    force_newest_first = _facebook_force_newest_first(state)
-
-    articles: list[dict[str, Any]] = []
-    for target in targets[:max_targets]:
-        payloads = _scrape_facebook_target_payloads(
-            target=target,
-            posts_per_target=posts_per_target,
-            headless=headless,
-            force_newest_first=force_newest_first,
-        )
-        target_articles: list[dict[str, Any]] = []
-        seen_urls: set[str] = set()
-        for payload in payloads:
-            article = _build_facebook_auto_article(payload, target=target)
-            if not article:
-                continue
-            url = str(article.get("url", "") or "")
-            if url in seen_urls:
-                continue
-            seen_urls.add(url)
-            target_articles.append(article)
-        target_articles = sorted(
-            target_articles,
-            key=lambda article: (
-                _facebook_published_hint_rank(
-                    str(article.get("published_hint_raw", article.get("published_hint", "")) or "")
-                ),
-                int(article.get("facebook_boss_style_score", 0) or 0),
-                len(str(article.get("content", "") or "")),
-            ),
-            reverse=True,
-        )[:posts_per_target]
-        logger.info("   Facebook auto [%s]: %d bài", target.get("label", ""), len(target_articles))
-        target["last_crawled_at"] = _utc_now_iso()
-        articles.extend(target_articles)
-    return articles
+    return _facebook_adapter.build_facebook_auto_articles(
+        state,
+        targets=targets,
+        auto_enabled=_facebook_auto_enabled(state),
+        load_targets_fn=_load_facebook_auto_targets,
+        cfg_int_fn=_cfg_int,
+        cfg_bool_fn=_cfg_bool,
+        force_newest_first_fn=_facebook_force_newest_first,
+        scrape_payloads_fn=_scrape_facebook_target_payloads,
+        build_article_fn=_build_facebook_auto_article,
+        logger=logger,
+        published_hint_rank_fn=_facebook_published_hint_rank,
+    )
 
 
 def _valid_github_repo_full_name(value: str) -> bool:
-    parts = [segment.strip() for segment in str(value or "").split("/") if segment.strip()]
-    return len(parts) == 2
+    from source_adapters.github_adapter import valid_github_repo_full_name
+
+    return valid_github_repo_full_name(value)
 
 
 def _build_github_repo_article(repo: dict[str, Any], *, source: str, query_context: str = "") -> dict[str, Any] | None:
-    full_name = str(repo.get("full_name", "") or "").strip()
-    html_url = str(repo.get("html_url", "") or "").strip()
-    description = str(repo.get("description", "") or "").strip()
-    topics = repo.get("topics", []) or []
-    language = str(repo.get("language", "") or "").strip()
-    owner = str((repo.get("owner") or {}).get("login", "") or "").strip()
-    stars = int(repo.get("stargazers_count", 0) or 0)
-    forks = int(repo.get("forks_count", 0) or 0)
-    updated_at = str(repo.get("pushed_at") or repo.get("updated_at") or "")
+    from source_adapters.github_adapter import build_github_repo_article
 
-    surface_text = " ".join(
-        part for part in [full_name, description, " ".join(str(topic) for topic in topics), language, query_context] if part
+    return build_github_repo_article(
+        repo,
+        source=source,
+        query_context=query_context,
+        is_founder_grade_candidate_fn=_is_founder_grade_candidate,
+        truncate_text_fn=_truncate_text,
     )
-    if not _is_founder_grade_candidate(full_name, description, html_url, surface_text):
-        return None
-    if source in {"GitHub API Search"} or source.startswith("GitHub API Org:"):
-        if not _has_github_agent_signal(surface_text):
-            return None
-
-    summary_bits = [
-        f"GitHub repo: {full_name}" if full_name else "",
-        f"owner={owner}" if owner else "",
-        f"language={language}" if language else "",
-        f"stars={stars}",
-        f"forks={forks}",
-        f"topics={', '.join(str(topic) for topic in topics[:8])}" if topics else "",
-        f"watchlist_query={query_context}" if query_context else "",
-    ]
-    content = " | ".join(bit for bit in summary_bits if bit)
-    if description:
-        content = f"{content}\n\n{description}" if content else description
-
-    return {
-        "title": full_name or html_url,
-        "url": html_url,
-        "source": source,
-        "snippet": _truncate_text(description or content, 500),
-        "content": _truncate_text(content, 4000),
-        "published": updated_at,
-        "fetched_at": datetime.now(timezone.utc).isoformat(),
-        "acquisition_quality": "high",
-        "github_signal_type": "repository",
-        "github_full_name": full_name,
-        "github_owner": owner,
-        "github_stars": stars,
-        "source_kind": "github",
-        "source_priority": 90,
-        "community_signal_strength": 2,
-    }
 
 
 def _build_github_release_article(
@@ -2001,43 +1061,15 @@ def _build_github_release_article(
     repo_full_name: str,
     source: str,
 ) -> dict[str, Any] | None:
-    html_url = str(release.get("html_url", "") or "").strip()
-    tag_name = str(release.get("tag_name", "") or "").strip()
-    name = str(release.get("name", "") or "").strip()
-    body = str(release.get("body", "") or "").strip()
-    published = str(release.get("published_at") or release.get("created_at") or "")
-    title = name or tag_name or f"{repo_full_name} release"
-    combined = " ".join(part for part in [repo_full_name, title, body] if part)
-    if not _is_founder_grade_candidate(title, body[:800], html_url, combined):
-        return None
+    from source_adapters.github_adapter import build_github_release_article
 
-    content = " | ".join(
-        bit
-        for bit in [
-            f"GitHub release: {repo_full_name}",
-            f"tag={tag_name}" if tag_name else "",
-            f"title={title}" if title else "",
-        ]
-        if bit
+    return build_github_release_article(
+        release,
+        repo_full_name=repo_full_name,
+        source=source,
+        is_founder_grade_candidate_fn=_is_founder_grade_candidate,
+        truncate_text_fn=_truncate_text,
     )
-    if body:
-        content = f"{content}\n\n{body}" if content else body
-
-    return {
-        "title": f"{repo_full_name} — {title}",
-        "url": html_url,
-        "source": source,
-        "snippet": _truncate_text(body or title, 500),
-        "content": _truncate_text(content, 4000),
-        "published": published,
-        "fetched_at": datetime.now(timezone.utc).isoformat(),
-        "acquisition_quality": "high",
-        "github_signal_type": "release",
-        "github_full_name": repo_full_name,
-        "source_kind": "github",
-        "source_priority": 90,
-        "community_signal_strength": 2,
-    }
 
 
 def _looks_like_watchlist_query(line: str) -> bool:
@@ -2348,83 +1380,19 @@ def _fetch_github_articles(
     max_org_repos: int,
     max_search_results: int,
 ) -> list[dict[str, Any]]:
-    """
-    Thu tín hiệu GitHub theo 3 lớp:
-    - repo watchlist: repo metadata + release mới
-    - org watchlist: repo update gần đây
-    - query watchlist: search repo/topic mới nổi
-    """
-    articles: list[dict[str, Any]] = []
-
-    for repo_full_name in repo_watchlist:
-        if not _valid_github_repo_full_name(repo_full_name):
-            logger.warning("Skip invalid GitHub repo watchlist entry: %s", repo_full_name)
-            continue
-
-        repo = _github_get_json(f"/repos/{repo_full_name}")
-        if isinstance(repo, dict):
-            article = _build_github_repo_article(repo, source=f"GitHub API Repo: {repo_full_name}")
-            if article:
-                articles.append(article)
-
-        if max_releases_per_repo <= 0:
-            continue
-        releases = _github_get_json(f"/repos/{repo_full_name}/releases", params={"per_page": max_releases_per_repo})
-        if not isinstance(releases, list):
-            continue
-        for release in releases[:max_releases_per_repo]:
-            article = _build_github_release_article(
-                release,
-                repo_full_name=repo_full_name,
-                source=f"GitHub API Release: {repo_full_name}",
-            )
-            if article:
-                articles.append(article)
-
-    for org in org_watchlist:
-        org_name = str(org or "").strip()
-        if not org_name:
-            continue
-        repos = _github_get_json(
-            f"/orgs/{org_name}/repos",
-            params={"sort": "updated", "direction": "desc", "per_page": max_org_repos},
-        )
-        if not isinstance(repos, list):
-            continue
-        for repo in repos[:max_org_repos]:
-            article = _build_github_repo_article(
-                repo,
-                source=f"GitHub API Org: {org_name}",
-                query_context=f"org:{org_name}",
-            )
-            if article:
-                articles.append(article)
-
-    search_cutoff = (datetime.now(timezone.utc) - timedelta(days=14)).date().isoformat()
-    for query in query_watchlist:
-        search_query = str(query or "").strip()
-        if not search_query:
-            continue
-        payload = _github_get_json(
-            "/search/repositories",
-            params={
-                "q": f"{search_query} pushed:>={search_cutoff}",
-                "sort": "updated",
-                "order": "desc",
-                "per_page": max_search_results,
-            },
-        )
-        items = payload.get("items", []) if isinstance(payload, dict) else []
-        for repo in items[:max_search_results]:
-            article = _build_github_repo_article(
-                repo,
-                source="GitHub API Search",
-                query_context=search_query,
-            )
-            if article:
-                articles.append(article)
-
-    return articles
+    return _fetch_github_articles_impl(
+        repo_watchlist=repo_watchlist,
+        org_watchlist=org_watchlist,
+        query_watchlist=query_watchlist,
+        max_releases_per_repo=max_releases_per_repo,
+        max_org_repos=max_org_repos,
+        max_search_results=max_search_results,
+        request_headers=REQUEST_HEADERS,
+        github_token=os.getenv("GITHUB_TOKEN", "").strip(),
+        logger=logger,
+        is_founder_grade_candidate_fn=_is_founder_grade_candidate,
+        truncate_text_fn=_truncate_text,
+    )
 
 
 async def _read_telegram_channels(channels: list[str], limit: int = 10) -> list[dict[str, Any]]:
@@ -2520,6 +1488,7 @@ def gather_news_node(state: dict[str, Any]) -> dict[str, Any]:
     facebook_headless = _cfg_bool(state, "facebook_auto_headless", "FACEBOOK_AUTO_HEADLESS", True)
 
     watchlist_seeds = load_watchlist_seeds(PROJECT_ROOT)
+    source_history_map = load_source_history()
     facebook_registry = {
         "discovered_sources": [],
         "auto_active_sources": _load_facebook_auto_targets() if _facebook_auto_enabled(state) else [],
@@ -2527,6 +1496,32 @@ def gather_news_node(state: dict[str, Any]) -> dict[str, Any]:
     }
     if _facebook_auto_enabled(state):
         facebook_registry = _resolve_facebook_source_registry(state, headless=facebook_headless)
+        filtered_auto_active, muted_sources = filter_discovered_sources_by_history(
+            list(facebook_registry.get("auto_active_sources", []) or []),
+            source_history_map,
+            max_active=_facebook_discovery_max_active_sources(state),
+        )
+        existing_candidates = {
+            str(source.get("url", "") or "").strip().lower(): dict(source)
+            for source in list(facebook_registry.get("candidate_sources", []) or [])
+            if isinstance(source, dict)
+        }
+        for source in muted_sources:
+            existing_candidates[str(source.get("url", "") or "").strip().lower()] = source
+        facebook_registry["auto_active_sources"] = filtered_auto_active
+        facebook_registry["candidate_sources"] = list(existing_candidates.values())
+    facebook_registry["discovered_sources"] = annotate_sources_with_history(
+        list(facebook_registry.get("discovered_sources", []) or []),
+        source_history_map,
+    )
+    facebook_registry["auto_active_sources"] = annotate_sources_with_history(
+        list(facebook_registry.get("auto_active_sources", []) or []),
+        source_history_map,
+    )
+    facebook_registry["candidate_sources"] = annotate_sources_with_history(
+        list(facebook_registry.get("candidate_sources", []) or []),
+        source_history_map,
+    )
 
     if enable_rss:
         logger.info("📡 Fetching curated RSS feeds (%dh qua) …", rss_hours)
@@ -2682,6 +1677,22 @@ def gather_news_node(state: dict[str, Any]) -> dict[str, Any]:
         raw_articles.extend(grok_scout_articles)
 
     deduped_raw_articles = _local_deduplicate_articles(raw_articles)
+    deduped_raw_articles = annotate_articles_with_source_history(deduped_raw_articles, source_history_map)
+    deduped_raw_articles, history_muted_count = _filter_history_muted_discoveries(deduped_raw_articles)
+    gather_snapshot_path = write_temporal_snapshot(
+        state=state,
+        stage="gather",
+        articles=deduped_raw_articles,
+        extra={
+            "raw_count_before_batch_dedup": len(raw_articles),
+            "raw_count_after_batch_dedup": len(deduped_raw_articles),
+            "grok_scout_count": len(grok_scout_articles) + len(grok_x_scout_articles),
+            "history_muted_count": history_muted_count,
+            "facebook_discovered_sources": len(facebook_registry.get("discovered_sources", []) or []),
+            "facebook_auto_active_sources": len(facebook_registry.get("auto_active_sources", []) or []),
+            "facebook_candidate_sources": len(facebook_registry.get("candidate_sources", []) or []),
+        },
+    )
     logger.info(
         "✅ Gathered %d raw articles total (%d sau dedup trong batch)",
         len(raw_articles),
@@ -2693,4 +1704,5 @@ def gather_news_node(state: dict[str, Any]) -> dict[str, Any]:
         "facebook_discovered_sources": list(facebook_registry.get("discovered_sources", []) or []),
         "facebook_auto_active_sources": list(facebook_registry.get("auto_active_sources", []) or []),
         "facebook_candidate_sources": list(facebook_registry.get("candidate_sources", []) or []),
+        "gather_snapshot_path": gather_snapshot_path,
     }

@@ -2,10 +2,10 @@
 """
 ui_server.py — Local control panel cho Daily Digest Agent.
 
-Phiên bản này thêm 3 lớp UX quan trọng:
+Phiên bản này ưu tiên 3 lớp UX quan trọng:
 - Approve from preview
-- chỉnh threshold / source toggle ngay trên giao diện
-- preset mode: test / publish / scheduled + mở report mới nhất
+- xem trước đúng output Telegram theo 3 lane
+- giữ review đơn giản, không biến UI thành nơi chỉnh threshold/preset
 """
 
 from __future__ import annotations
@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import errno
 import sys
 import threading
 import time
@@ -50,40 +51,12 @@ def _harden_http_logging() -> None:
 _harden_http_logging()
 
 
-def _env_int(key: str, default: int) -> int:
-    try:
-        return int(os.getenv(key, str(default)))
-    except (TypeError, ValueError):
-        return default
-
-
 def _default_runtime_config() -> dict[str, Any]:
     """
-    Default controls hiển thị trên UI.
-    Giá trị lấy từ env để UI không lệch với production hiện tại.
+    UI preview không nên tự override production.
+    Mặc định trả về rỗng để pipeline đọc config thật từ env/runtime bên dưới.
     """
-    return {
-        "min_deep_analysis_score": _env_int("MIN_DEEP_ANALYSIS_SCORE", 60),
-        "max_classify_articles": _env_int("MAX_CLASSIFY_ARTICLES", 8),
-        "max_deep_analysis_articles": _env_int("MAX_DEEP_ANALYSIS_ARTICLES", 10),
-        "gather_rss_hours": _env_int("GATHER_RSS_HOURS", 72),
-        "classify_content_char_limit": _env_int("CLASSIFY_CONTENT_CHAR_LIMIT", 900),
-        "classify_max_tokens": _env_int("CLASSIFY_MAX_TOKENS", 320),
-        "skip_feedback_sync": False,
-        "enable_rss": True,
-        "enable_github": os.getenv("GITHUB_ENABLED", "1").strip().lower() not in {"0", "false", "no"},
-        "enable_social_signals": os.getenv("ENABLE_SOCIAL_SIGNALS", "1").strip().lower() not in {"0", "false", "no"},
-        "enable_ddg": True,
-        "enable_hn": os.getenv("HN_ENABLED", "1").strip().lower() not in {"0", "false", "no"},
-        "enable_reddit": os.getenv("REDDIT_ENABLED", "1").strip().lower() not in {"0", "false", "no"},
-        "enable_watchlist": os.getenv("ENABLE_WATCHLIST", "1").strip().lower() not in {"0", "false", "no"},
-        "enable_telegram_channels": os.getenv("ENABLE_TELEGRAM_CHANNELS", "1").strip().lower() not in {"0", "false", "no"},
-        "github_max_watchlist_repos": _env_int("GITHUB_MAX_WATCHLIST_REPOS", 6),
-        "github_max_orgs": _env_int("GITHUB_MAX_ORGS", 4),
-        "github_max_queries": _env_int("GITHUB_MAX_QUERIES", 4),
-        "github_max_org_repos": _env_int("GITHUB_MAX_ORG_REPOS", 4),
-        "github_max_search_results": _env_int("GITHUB_MAX_SEARCH_RESULTS", 4),
-    }
+    return {}
 
 
 class _RunLogHandler(logging.Handler):
@@ -290,42 +263,50 @@ def _status_payload() -> dict[str, Any]:
 
 
 def _normalize_runtime_config(raw: dict[str, Any] | None) -> dict[str, Any]:
-    merged = dict(_default_runtime_config())
-    for key, value in dict(raw or {}).items():
-        merged[key] = value
+    merged = dict(raw or {})
+    if not merged:
+        return {}
 
-    int_keys = {
-        "min_deep_analysis_score",
-        "max_classify_articles",
-        "max_deep_analysis_articles",
-        "github_max_watchlist_repos",
-        "github_max_orgs",
-        "github_max_queries",
-        "github_max_org_repos",
-        "github_max_search_results",
-        "gather_rss_hours",
-        "classify_content_char_limit",
-        "classify_max_tokens",
+    int_defaults = {
+        "min_deep_analysis_score": 60,
+        "max_classify_articles": 8,
+        "max_deep_analysis_articles": 10,
+        "github_max_watchlist_repos": 6,
+        "github_max_orgs": 4,
+        "github_max_queries": 4,
+        "github_max_org_repos": 4,
+        "github_max_search_results": 4,
+        "gather_rss_hours": 72,
+        "classify_content_char_limit": 900,
+        "classify_max_tokens": 320,
     }
-    for key in int_keys:
+    for key, default in int_defaults.items():
+        if key not in merged:
+            continue
         try:
             merged[key] = int(merged[key])
-        except (TypeError, ValueError, KeyError):
-            merged[key] = _default_runtime_config()[key]
+        except (TypeError, ValueError):
+            merged[key] = default
 
-    bool_keys = {
-        "enable_rss",
-        "enable_github",
-        "enable_social_signals",
-        "enable_ddg",
-        "enable_hn",
-        "enable_reddit",
-        "enable_watchlist",
-        "enable_telegram_channels",
-        "skip_feedback_sync",
+    bool_defaults = {
+        "enable_rss": True,
+        "enable_github": True,
+        "enable_social_signals": True,
+        "enable_ddg": True,
+        "enable_hn": True,
+        "enable_reddit": True,
+        "enable_watchlist": True,
+        "enable_telegram_channels": True,
+        "skip_feedback_sync": False,
     }
-    for key in bool_keys:
-        merged[key] = bool(merged.get(key))
+    for key, default in bool_defaults.items():
+        if key not in merged:
+            continue
+        value = merged.get(key)
+        if isinstance(value, bool):
+            merged[key] = value
+        else:
+            merged[key] = str(value).strip().lower() not in {"0", "false", "no", "off"} if value is not None else default
 
     return merged
 
@@ -747,6 +728,7 @@ HTML_PAGE = """<!doctype html>
     button:hover { transform: translateY(-1px); filter: brightness(1.04); }
     button:disabled { opacity: 0.45; cursor: not-allowed; transform: none; filter: none; }
     .btn-preview { background: linear-gradient(180deg, #2b98f0, #2381d2); color: white; }
+    .btn-smart { background: linear-gradient(180deg, #7a66f2, #5e4fe0); color: white; }
     .btn-approve { background: linear-gradient(180deg, #39a872, #2c8f62); color: white; }
     .btn-publish { background: linear-gradient(180deg, #db7a5d, #c76549); color: white; }
     .btn-notion { background: linear-gradient(180deg, #86715e, #6f5d4e); color: white; }
@@ -837,6 +819,56 @@ HTML_PAGE = """<!doctype html>
         linear-gradient(180deg, rgba(255, 255, 255, 0.01), rgba(255, 255, 255, 0));
       background-size: 26px 26px, 100% 100%;
     }
+    .lane-stack {
+      padding: 16px;
+      display: grid;
+      gap: 14px;
+      background-image:
+        radial-gradient(circle at 12px 12px, rgba(255, 255, 255, 0.03) 2px, transparent 0),
+        linear-gradient(180deg, rgba(255, 255, 255, 0.01), rgba(255, 255, 255, 0));
+      background-size: 26px 26px, 100% 100%;
+    }
+    .topic-card {
+      border-radius: 20px;
+      overflow: hidden;
+      border: 1px solid rgba(255, 255, 255, 0.06);
+      background: linear-gradient(180deg, rgba(24, 38, 54, 0.98), rgba(19, 31, 46, 0.98));
+      box-shadow: 0 14px 30px rgba(4, 12, 22, 0.18);
+    }
+    .topic-head {
+      padding: 12px 14px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 12px;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+      background: rgba(255, 255, 255, 0.03);
+    }
+    .topic-title {
+      font-size: 14px;
+      font-weight: 800;
+      color: #f1f6fc;
+    }
+    .topic-copy {
+      margin-top: 3px;
+      font-size: 12px;
+      color: rgba(227, 236, 246, 0.6);
+    }
+    .topic-meta {
+      padding: 6px 10px;
+      border-radius: 999px;
+      background: rgba(43, 152, 240, 0.13);
+      color: #cce7ff;
+      font-size: 11px;
+      font-weight: 700;
+      white-space: nowrap;
+    }
+    .topic-thread {
+      padding: 12px 12px 14px;
+      display: grid;
+      gap: 10px;
+      min-height: 170px;
+    }
     .tg-bubble,
     .tg-empty {
       max-width: 92%;
@@ -864,33 +896,6 @@ HTML_PAGE = """<!doctype html>
     .tg-bubble-meta {
       color: rgba(227, 236, 246, 0.52);
       font-weight: 600;
-    }
-    .telegram-composer {
-      padding: 14px 16px 16px;
-      border-top: 1px solid var(--line-strong);
-      background: rgba(20, 31, 47, 0.94);
-      display: flex;
-      align-items: center;
-      gap: 12px;
-    }
-    .composer-chip {
-      width: 38px;
-      height: 38px;
-      border-radius: 14px;
-      display: grid;
-      place-items: center;
-      color: rgba(235, 242, 249, 0.72);
-      background: rgba(255, 255, 255, 0.06);
-    }
-    .composer-input {
-      flex: 1;
-      min-height: 46px;
-      border-radius: 999px;
-      padding: 12px 18px;
-      background: rgba(255, 255, 255, 0.06);
-      color: rgba(236, 242, 249, 0.5);
-      display: flex;
-      align-items: center;
     }
     .notion-window {
       min-height: 760px;
@@ -1203,8 +1208,9 @@ HTML_PAGE = """<!doctype html>
           <div class="status-pill"><span id="status-dot" class="dot"></span><span id="status-text">Idle</span></div>
           <h1>Founder-grade digest preview workspace</h1>
           <p class="hero-copy">
-            Preview trước, soi brief theo kiểu Telegram, rồi nhìn từng bài dưới dạng database như Notion.
-            Mục tiêu của màn này là giúp bạn review nguồn, score, founder fit và quyết định nhanh trước khi publish thật.
+            Màn này chỉ làm một việc: cho bạn xem trước đầu ra sẽ lên Telegram ở các topic khác nhau.
+            `Run Preview` là baseline bám production; `Grok Smart` là nhánh thử nghiệm mở rộng Grok để so chất lượng.
+            UI không còn là nơi chỉnh tham số thủ công.
           </p>
 
           <div class="hero-metrics">
@@ -1213,53 +1219,17 @@ HTML_PAGE = """<!doctype html>
             <span class="meta-chip">Summary <span id="summary-mode">-</span></span>
             <span class="meta-chip">Health <span id="health-status">-</span></span>
             <span class="meta-chip">Publish ready <span id="publish-ready">-</span></span>
+            <span class="meta-chip">Main ready <span id="main-candidate-chip">0</span></span>
+            <span class="meta-chip">GitHub ready <span id="github-candidate-chip">0</span></span>
+            <span class="meta-chip">Facebook ready <span id="facebook-candidate-chip">0</span></span>
             <span class="meta-chip">Notion pages <span id="notion-count">0</span></span>
             <span class="meta-chip">Telegram sent <span id="telegram-sent">no</span></span>
             <span id="preview-state-pill" class="tiny-chip">preview state: idle</span>
           </div>
 
-          <div class="control-grid">
-            <div class="control-box">
-              <div class="label">Preset mode</div>
-              <select id="preset-mode">
-                <option value="test">Test / Preview</option>
-                <option value="fast">Fast Preview</option>
-                <option value="publish">Publish</option>
-                <option value="scheduled">Scheduled Simulation</option>
-              </select>
-            </div>
-            <div class="control-box">
-              <div class="label">MIN_DEEP_ANALYSIS_SCORE</div>
-              <input id="cfg-min-score" type="number" min="10" max="100" value="60" />
-            </div>
-            <div class="control-box">
-              <div class="label">MAX_CLASSIFY_ARTICLES</div>
-              <input id="cfg-max-classify" type="number" min="1" max="30" value="8" />
-            </div>
-            <div class="control-box">
-              <div class="label">MAX_DEEP_ANALYSIS_ARTICLES</div>
-              <input id="cfg-max-top" type="number" min="0" max="20" value="10" />
-            </div>
-            <div class="control-box">
-              <div class="label">GATHER_RSS_HOURS</div>
-              <input id="cfg-rss-hours" type="number" min="12" max="168" value="72" />
-            </div>
-          </div>
-
-          <div class="toggle-grid">
-            <label class="toggle"><input id="src-rss" type="checkbox" checked /> RSS</label>
-            <label class="toggle"><input id="src-github" type="checkbox" checked /> GitHub</label>
-            <label class="toggle"><input id="src-social" type="checkbox" checked /> Social inbox</label>
-            <label class="toggle"><input id="src-ddg" type="checkbox" checked /> DDG</label>
-            <label class="toggle"><input id="src-hn" type="checkbox" checked /> HN</label>
-            <label class="toggle"><input id="src-reddit" type="checkbox" checked /> Reddit</label>
-            <label class="toggle"><input id="src-watchlist" type="checkbox" checked /> Watchlist</label>
-            <label class="toggle"><input id="src-telegram" type="checkbox" checked /> Telegram channels</label>
-          </div>
-
           <div class="toolbar">
-            <button id="btn-preview" class="btn-preview">Run Preview</button>
-            <button id="btn-fast-preview" class="btn-refresh">Fast Preview</button>
+            <button id="btn-preview" class="btn-preview">Run Preview (Production)</button>
+            <button id="btn-smart-preview" class="btn-smart">Run Preview (Grok Smart)</button>
             <button id="btn-notion-only" class="btn-notion">Publish Notion only</button>
             <button id="btn-approve" class="btn-approve">Approve Preview</button>
             <button id="btn-publish" class="btn-publish">Publish thật</button>
@@ -1273,17 +1243,17 @@ HTML_PAGE = """<!doctype html>
           <div class="side-title">Run timer</div>
           <div id="elapsed" class="side-number">0.0s</div>
           <p class="side-copy">
-            Dùng preview để soi format, xác thực tín hiệu và xem batch hiện tại đã đủ “đáng gửi sếp” hay chưa.
-            Fast preview sẽ ưu tiên tốc độ; publish Notion only giúp review database trước; approve sẽ gửi đúng batch vừa duyệt.
+            Baseline preview dùng cùng backbone production và chưa tạo side effect ra ngoài.
+            Nếu muốn thử batch “gắt” hơn, dùng Grok Smart rồi so trực tiếp 3 lane Telegram ở bên dưới.
           </p>
           <div class="guide-list" style="margin-top: 18px;">
             <div class="guide-item" style="background: rgba(255,255,255,0.06); border-color: rgba(255,255,255,0.08); color: rgba(231, 238, 247, 0.74);">
-              <strong style="color: white;">Founder lens</strong>
-              Giao diện này ưu tiên nhìn nhanh: nguồn nào đáng tin, bài nào có fit với startup AI, và đâu là tín hiệu cần đào sâu hơn như khi sếp soi X / Facebook / official blogs.
+              <strong style="color: white;">Production-aligned preview</strong>
+              UI không còn là nơi vặn threshold hay source toggle. Nó chỉ phản chiếu batch thật theo đúng logic pipeline hiện tại.
             </div>
             <div class="guide-item" style="background: rgba(255,255,255,0.06); border-color: rgba(255,255,255,0.08); color: rgba(231, 238, 247, 0.74);">
-              <strong style="color: white;">Long-term path</strong>
-              RSS, watchlist, official blogs, HN, Reddit, Telegram channels đang là đường bền hơn Nitter hay API tạm thời. UI mới này giúp review retrieval chứ không chỉ nhìn summary cuối.
+              <strong style="color: white;">Realtime ops vẫn giữ nguyên</strong>
+              Chạy publish bằng terminal vẫn có log realtime như cũ. UI này chỉ phục vụ review output trước khi bạn bắn ra Telegram.
             </div>
           </div>
         </div>
@@ -1291,9 +1261,11 @@ HTML_PAGE = """<!doctype html>
 
       <section class="stats-grid">
         <div class="stats-card"><div class="label">Raw gathered</div><div class="metric-value" id="raw-count">0</div><div class="metric-copy">Tổng số tín hiệu kéo về từ mọi nguồn.</div></div>
-        <div class="stats-card"><div class="label">After dedup</div><div class="metric-value" id="new-count">0</div><div class="metric-copy">Số tin còn lại sau lọc trùng và làm sạch.</div></div>
         <div class="stats-card"><div class="label">Scored</div><div class="metric-value" id="scored-count">0</div><div class="metric-copy">Số bài đã được classify và chấm điểm.</div></div>
-        <div class="stats-card"><div class="label">Telegram candidates</div><div class="metric-value" id="tg-candidate-count">0</div><div class="metric-copy">Những bài đủ sức thành brief gửi ra ngoài.</div></div>
+        <div class="stats-card"><div class="label">Main topic</div><div class="metric-value" id="tg-candidate-count">0</div><div class="metric-copy">Số bài đủ chuẩn cho bản tin chính.</div></div>
+        <div class="stats-card"><div class="label">GitHub topic</div><div class="metric-value" id="github-candidate-count">0</div><div class="metric-copy">Repo/release đủ chuẩn cho topic GitHub.</div></div>
+        <div class="stats-card"><div class="label">Facebook topic</div><div class="metric-value" id="facebook-candidate-count">0</div><div class="metric-copy">Post community đủ chuẩn cho Facebook News.</div></div>
+        <div class="stats-card"><div class="label">Notion pages</div><div class="metric-value" id="notion-count-card">0</div><div class="metric-copy">Số page được tạo hoặc reuse trong batch này.</div></div>
       </section>
 
       <section class="preview-grid">
@@ -1302,22 +1274,49 @@ HTML_PAGE = """<!doctype html>
             <div class="telegram-title">
               <div class="telegram-avatar">DD</div>
               <div>
-                <h2>Tin tức công nghệ mới nhất</h2>
-                <div class="telegram-subtitle">Telegram-style digest preview cho batch hiện tại</div>
+                <h2>Telegram Output Preview</h2>
+                <div class="telegram-subtitle">Xem trước đúng 3 lane: main brief, GitHub repo, Facebook News</div>
               </div>
             </div>
             <div class="telegram-actions">
-              <span>Search</span>
-              <span>Split</span>
-              <span>More</span>
+              <span>Main</span>
+              <span>GitHub</span>
+              <span>Facebook</span>
             </div>
           </div>
-          <div id="messages" class="telegram-thread"></div>
-          <div class="telegram-composer">
-            <div class="composer-chip">+</div>
-            <div class="composer-input">Write a message...</div>
-            <div class="composer-chip">/</div>
-            <div class="composer-chip">Mic</div>
+          <div class="lane-stack">
+            <section class="topic-card">
+              <div class="topic-head">
+                <div>
+                  <div class="topic-title">Main Brief</div>
+                  <div class="topic-copy">Topic bản tin chính như trên Telegram thread hiện tại</div>
+                </div>
+                <span id="main-topic-meta" class="topic-meta">0 messages</span>
+              </div>
+              <div id="messages-main" class="topic-thread"></div>
+            </section>
+
+            <section class="topic-card">
+              <div class="topic-head">
+                <div>
+                  <div class="topic-title">GitHub Repo Digest</div>
+                  <div class="topic-copy">Lane repo/release, không chen vào bản tin chính</div>
+                </div>
+                <span id="github-topic-meta" class="topic-meta">0 messages</span>
+              </div>
+              <div id="messages-github" class="topic-thread"></div>
+            </section>
+
+            <section class="topic-card">
+              <div class="topic-head">
+                <div>
+                  <div class="topic-title">Facebook News</div>
+                  <div class="topic-copy">Lane community riêng cho group/page/profile Facebook</div>
+                </div>
+                <span id="facebook-topic-meta" class="topic-meta">0 messages</span>
+              </div>
+              <div id="messages-facebook" class="topic-thread"></div>
+            </section>
           </div>
         </section>
 
@@ -1410,26 +1409,26 @@ HTML_PAGE = """<!doctype html>
 
       <section class="bottom-grid">
         <section class="light-panel">
-          <h2>Operator Guide</h2>
+          <h2>Preview Principles</h2>
           <p class="hint-light">
-            Mình đã điều chỉnh copy theo bối cảnh hiện tại: đây không chỉ là bot tổng hợp tin, mà là nền để build nhiều agent sau này.
+            Màn preview bây giờ không còn là nơi “vọc thông số”. Nó chỉ giúp bạn nhìn đúng đầu ra của pipeline hiện tại trước khi publish.
           </p>
           <div class="guide-list">
             <div class="guide-item">
-              <strong>MIN_DEEP_ANALYSIS_SCORE</strong>
-              Tăng nếu muốn scoring bảo thủ như một lớp editorial gate. Giảm khi bạn muốn bắt tín hiệu sớm, nhưng chấp nhận nhiều bài phải review thủ công hơn.
+              <strong>Preview = production without sending</strong>
+              Run Preview dùng cùng source mix, scoring, routing và editorial logic như publish thật; khác biệt chính là chưa tạo side effect ra ngoài.
             </div>
             <div class="guide-item">
-              <strong>MAX_CLASSIFY_ARTICLES và MAX_DEEP_ANALYSIS_ARTICLES</strong>
-              Đây là hai nút quan trọng để cân bằng giữa coverage và chiều sâu. Nếu bạn đang demo cho sếp, nên giữ preview gọn để nhìn logic trước rồi mới mở rộng batch.
+              <strong>3 lane tách biệt</strong>
+              Main brief, GitHub Repo Digest và Facebook News được xem riêng, để bạn nhìn đúng việc bài nào đang rơi vào lane nào thay vì bị trộn chung.
             </div>
             <div class="guide-item">
-              <strong>Source mix dài hạn</strong>
-              RSS, official blogs, watchlist, HN, Reddit và Telegram channels là đường bền hơn Nitter hoặc một API chỉ dùng tạm đến tháng 7.
+              <strong>Terminal realtime vẫn là nơi chạy ops</strong>
+              Khi bạn muốn xem log runtime từng bước hoặc chạy publish theo thói quen cũ, terminal vẫn là kênh realtime quan trọng nhất.
             </div>
             <div class="guide-item">
-              <strong>Founder fit</strong>
-              Cột project fit trong database là lớp hiển thị bổ sung để bạn xem nhanh bài nào có thể biến thành insight, sản phẩm hoặc theo dõi chiến lược.
+              <strong>Database mirror vẫn giữ</strong>
+              Bảng bên phải vẫn hữu ích để soi score, fit và source của từng bài, nhưng quyết định cuối nên dựa vào output Telegram preview ở bên trái.
             </div>
           </div>
         </section>
@@ -1458,26 +1457,6 @@ HTML_PAGE = """<!doctype html>
       selectedIndex: 0,
     };
 
-    function runtimeConfigFromForm() {
-      return {
-        min_deep_analysis_score: parseInt(document.getElementById('cfg-min-score').value || '60', 10),
-        max_classify_articles: parseInt(document.getElementById('cfg-max-classify').value || '8', 10),
-        max_deep_analysis_articles: parseInt(document.getElementById('cfg-max-top').value || '10', 10),
-        gather_rss_hours: parseInt(document.getElementById('cfg-rss-hours').value || '72', 10),
-        classify_content_char_limit: 900,
-        classify_max_tokens: 320,
-        skip_feedback_sync: false,
-        enable_rss: document.getElementById('src-rss').checked,
-        enable_github: document.getElementById('src-github').checked,
-        enable_social_signals: document.getElementById('src-social').checked,
-        enable_ddg: document.getElementById('src-ddg').checked,
-        enable_hn: document.getElementById('src-hn').checked,
-        enable_reddit: document.getElementById('src-reddit').checked,
-        enable_watchlist: document.getElementById('src-watchlist').checked,
-        enable_telegram_channels: document.getElementById('src-telegram').checked,
-      };
-    }
-
     function escapeHtml(value) {
       return String(value || '')
         .replaceAll('&', '&amp;')
@@ -1505,58 +1484,20 @@ HTML_PAGE = """<!doctype html>
       return data;
     }
 
-    function applyPresetToConfig(preset, config) {
-      const next = Object.assign({}, config || {});
-      if (preset === 'fast') {
-        next.min_deep_analysis_score = Math.max(65, parseInt(next.min_deep_analysis_score || '60', 10));
-        next.max_classify_articles = Math.min(8, Math.max(6, parseInt(next.max_classify_articles || '8', 10)));
-        next.max_deep_analysis_articles = Math.min(2, Math.max(1, parseInt(next.max_deep_analysis_articles || '1', 10)));
-        next.gather_rss_hours = Math.min(36, parseInt(next.gather_rss_hours || '72', 10));
-        next.classify_content_char_limit = 520;
-        next.classify_max_tokens = 220;
-        next.skip_feedback_sync = true;
-        next.enable_rss = true;
-        next.enable_github = true;
-        next.enable_social_signals = false;
-        next.enable_watchlist = true;
-        next.github_max_watchlist_repos = 4;
-        next.github_max_orgs = 2;
-        next.github_max_queries = 2;
-        next.github_max_org_repos = 1;
-        next.github_max_search_results = 1;
-        next.enable_ddg = false;
-        next.enable_hn = false;
-        next.enable_reddit = false;
-        next.enable_telegram_channels = false;
-      }
-      return next;
+    async function runPreview() {
+      await callApi('/api/run', { mode: 'preview', run_profile: 'preview' });
+      await refreshStatus();
     }
 
-    function setFormFromConfig(config) {
-      hydrateConfig(config);
+    async function runSmartPreview() {
+      await callApi('/api/run', { mode: 'preview', run_profile: 'grok_smart' });
+      await refreshStatus();
     }
 
-    async function runFromPreset(forcedPreset) {
-      const preset = forcedPreset || document.getElementById('preset-mode').value;
-      const runtime_config = applyPresetToConfig(preset, runtimeConfigFromForm());
-      setFormFromConfig(runtime_config);
-      let mode = 'preview';
-      let run_profile = preset;
-
-      if (preset === 'publish') {
-        mode = 'publish';
-      } else if (preset === 'scheduled') {
-        mode = 'preview';
-      } else {
-        mode = 'preview';
-      }
-
-      if (mode === 'publish') {
-        const ok = confirm('Chạy publish thật? Việc này có thể gửi Telegram và tạo Notion page.');
-        if (!ok) return;
-      }
-
-      await callApi('/api/run', { mode, run_profile, runtime_config });
+    async function runPublish() {
+      const ok = confirm('Chạy publish thật? Việc này có thể gửi Telegram và tạo Notion page.');
+      if (!ok) return;
+      await callApi('/api/run', { mode: 'publish', run_profile: 'publish' });
       await refreshStatus();
     }
 
@@ -1579,11 +1520,13 @@ HTML_PAGE = """<!doctype html>
       await refreshStatus();
     }
 
-    function renderMessages(messages) {
-      const container = document.getElementById('messages');
+    function renderLaneMessages(containerId, metaId, messages, emptyText, laneLabel) {
+      const container = document.getElementById(containerId);
+      const meta = document.getElementById(metaId);
       container.innerHTML = '';
+      meta.textContent = `${(messages || []).length} messages`;
       if (!messages || !messages.length) {
-        container.innerHTML = '<div class="tg-empty">Chưa có preview message nào. Hãy chạy preview để xem luồng brief kiểu Telegram.</div>';
+        container.innerHTML = `<div class="tg-empty">${escapeHtml(emptyText)}</div>`;
         return;
       }
       const decodeEntities = (input) => {
@@ -1596,29 +1539,13 @@ HTML_PAGE = """<!doctype html>
         box.className = 'tg-bubble';
         const header = document.createElement('div');
         header.className = 'tg-bubble-head';
-        header.innerHTML = `<span>Digest chunk ${index + 1}</span><span class="tg-bubble-meta">preview</span>`;
+        header.innerHTML = `<span>${escapeHtml(laneLabel)} · chunk ${index + 1}</span><span class="tg-bubble-meta">preview</span>`;
         const body = document.createElement('div');
         body.textContent = decodeEntities((message || '').replace(/<[^>]+>/g, ''));
         box.appendChild(header);
         box.appendChild(body);
         container.appendChild(box);
       });
-    }
-
-    function hydrateConfig(config) {
-      if (!config) return;
-      document.getElementById('cfg-min-score').value = config.min_deep_analysis_score ?? 60;
-      document.getElementById('cfg-max-classify').value = config.max_classify_articles ?? 8;
-      document.getElementById('cfg-max-top').value = config.max_deep_analysis_articles ?? 10;
-      document.getElementById('cfg-rss-hours').value = config.gather_rss_hours ?? 72;
-      document.getElementById('src-rss').checked = !!config.enable_rss;
-      document.getElementById('src-github').checked = !!config.enable_github;
-      document.getElementById('src-social').checked = !!config.enable_social_signals;
-      document.getElementById('src-ddg').checked = !!config.enable_ddg;
-      document.getElementById('src-hn').checked = !!config.enable_hn;
-      document.getElementById('src-reddit').checked = !!config.enable_reddit;
-      document.getElementById('src-watchlist').checked = !!config.enable_watchlist;
-      document.getElementById('src-telegram').checked = !!config.enable_telegram_channels;
     }
 
     function renderWorkspaceDetail() {
@@ -1738,14 +1665,19 @@ HTML_PAGE = """<!doctype html>
       document.getElementById('status-dot').className = data.running ? 'dot running' : 'dot';
       document.getElementById('elapsed').textContent = `${data.elapsed_seconds || result.elapsed_seconds || 0}s`;
       document.getElementById('raw-count').textContent = result.raw_count || 0;
-      document.getElementById('new-count').textContent = result.new_count || 0;
       document.getElementById('scored-count').textContent = result.scored_count || 0;
       document.getElementById('tg-candidate-count').textContent = result.telegram_candidate_count || 0;
+      document.getElementById('github-candidate-count').textContent = result.github_topic_candidate_count || 0;
+      document.getElementById('facebook-candidate-count').textContent = result.facebook_topic_candidate_count || 0;
+      document.getElementById('notion-count-card').textContent = result.notion_count || 0;
       document.getElementById('run-mode').textContent = result.run_mode || data.last_mode || '-';
       document.getElementById('run-profile').textContent = result.run_profile || data.last_profile || '-';
       document.getElementById('summary-mode').textContent = result.summary_mode || '-';
       document.getElementById('health-status').textContent = (result.run_health || {}).status || '-';
       document.getElementById('publish-ready').textContent = result.publish_ready ? 'yes' : 'no';
+      document.getElementById('main-candidate-chip').textContent = result.telegram_candidate_count || 0;
+      document.getElementById('github-candidate-chip').textContent = result.github_topic_candidate_count || 0;
+      document.getElementById('facebook-candidate-chip').textContent = result.facebook_topic_candidate_count || 0;
       document.getElementById('notion-count').textContent = result.notion_count || 0;
       document.getElementById('telegram-sent').textContent = result.telegram_sent ? 'yes' : 'no';
       document.getElementById('run-health').textContent = JSON.stringify(result.run_health || {}, null, 2);
@@ -1757,12 +1689,31 @@ HTML_PAGE = """<!doctype html>
       document.getElementById('last-error').textContent = data.last_error || '';
       document.getElementById('preview-state-pill').textContent = `preview state: ${data.preview_publish_state || 'preview only'}`;
 
-      hydrateConfig(data.runtime_config);
-      renderMessages(result.telegram_messages || []);
+      renderLaneMessages(
+        'messages-main',
+        'main-topic-meta',
+        result.telegram_messages || [],
+        'Chưa có bản tin chính nào. Hãy chạy preview để xem batch hiện tại.',
+        'Main'
+      );
+      renderLaneMessages(
+        'messages-github',
+        'github-topic-meta',
+        result.github_topic_messages || [],
+        'Chưa có message nào cho GitHub Repo Digest ở batch này.',
+        'GitHub'
+      );
+      renderLaneMessages(
+        'messages-facebook',
+        'facebook-topic-meta',
+        result.facebook_topic_messages || [],
+        'Chưa có message nào cho Facebook News ở batch này.',
+        'Facebook'
+      );
       renderWorkspace(data.preview_articles || [], data.preview_publish_state || 'preview only');
 
       document.getElementById('btn-preview').disabled = data.running;
-      document.getElementById('btn-fast-preview').disabled = data.running;
+      document.getElementById('btn-smart-preview').disabled = data.running;
       document.getElementById('btn-notion-only').disabled = data.running || !data.can_publish_notion_only;
       document.getElementById('btn-publish').disabled = data.running;
       document.getElementById('btn-refresh').disabled = data.running;
@@ -1770,19 +1721,10 @@ HTML_PAGE = """<!doctype html>
       document.getElementById('btn-open-report').disabled = !result.run_report_path;
     }
 
-    document.getElementById('btn-preview').addEventListener('click', () => {
-      document.getElementById('preset-mode').value = 'test';
-      runFromPreset('test');
-    });
-    document.getElementById('btn-fast-preview').addEventListener('click', () => {
-      document.getElementById('preset-mode').value = 'fast';
-      runFromPreset('fast');
-    });
+    document.getElementById('btn-preview').addEventListener('click', runPreview);
+    document.getElementById('btn-smart-preview').addEventListener('click', runSmartPreview);
     document.getElementById('btn-notion-only').addEventListener('click', publishNotionOnly);
-    document.getElementById('btn-publish').addEventListener('click', () => {
-      document.getElementById('preset-mode').value = 'publish';
-      runFromPreset('publish');
-    });
+    document.getElementById('btn-publish').addEventListener('click', runPublish);
     document.getElementById('btn-approve').addEventListener('click', approvePreview);
     document.getElementById('btn-refresh').addEventListener('click', refreshStatus);
     document.getElementById('btn-open-report').addEventListener('click', () => {
@@ -1899,12 +1841,44 @@ def _configure_logging() -> None:
     logging.getLogger().addHandler(handler)
 
 
+def _ui_port_candidates(requested_port: int) -> list[int]:
+    raw_span = os.getenv("DIGEST_UI_PORT_FALLBACK_SPAN", "12")
+    try:
+        span = max(0, min(50, int(raw_span)))
+    except (TypeError, ValueError):
+        span = 12
+    return [requested_port + offset for offset in range(span + 1)]
+
+
+def _bind_ui_server(host: str, requested_port: int) -> tuple[ThreadingHTTPServer, int]:
+    last_error: OSError | None = None
+    for candidate_port in _ui_port_candidates(requested_port):
+        try:
+            httpd = ThreadingHTTPServer((host, candidate_port), DigestUIHandler)
+            if candidate_port != requested_port:
+                logger.warning(
+                    "⚠️ Port %d đang bị chiếm, Digest UI tự chuyển sang port %d.",
+                    requested_port,
+                    candidate_port,
+                )
+            return httpd, candidate_port
+        except OSError as exc:
+            last_error = exc
+            if exc.errno not in {errno.EADDRINUSE, 48, 98}:
+                raise
+            logger.warning("Port %d đang bị chiếm, thử port khác…", candidate_port)
+
+    raise RuntimeError(
+        f"Không bind được Digest UI từ port {requested_port} tới {requested_port + len(_ui_port_candidates(requested_port)) - 1}."
+    ) from last_error
+
+
 def main() -> None:
     _configure_logging()
     port = int(os.getenv("DIGEST_UI_PORT", "8787"))
     host = os.getenv("DIGEST_UI_HOST", "127.0.0.1")
-    httpd = ThreadingHTTPServer((host, port), DigestUIHandler)
-    logger.info("🌐 Digest UI running at http://%s:%d", host, port)
+    httpd, bound_port = _bind_ui_server(host, port)
+    logger.info("🌐 Digest UI running at http://%s:%d", host, bound_port)
     httpd.serve_forever()
 
 

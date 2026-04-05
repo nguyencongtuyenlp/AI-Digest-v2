@@ -133,6 +133,9 @@ def summarize_result(result: dict[str, Any], elapsed_seconds: float) -> dict[str
         "feedback_sync": dict(result.get("feedback_sync", {}) or {}),
         "run_health": dict(result.get("run_health", {}) or {}),
         "publish_ready": bool(result.get("publish_ready", False)),
+        "gather_snapshot_path": str(result.get("gather_snapshot_path", "") or ""),
+        "scored_snapshot_path": str(result.get("scored_snapshot_path", "") or ""),
+        "artifact_cleanup": dict(result.get("artifact_cleanup", {}) or {}),
     }
 
 

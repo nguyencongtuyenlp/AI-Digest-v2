@@ -48,14 +48,16 @@ _harden_http_logging()
 
 def main() -> None:
     """Chạy toàn bộ pipeline Daily Digest Agent."""
+    run_profile = str(os.getenv("DIGEST_RUN_PROFILE", "publish") or "publish").strip().lower()
     logger.info("=" * 60)
     logger.info("🚀 Daily Digest AI Agent (MVP2)")
     logger.info("   Model: %s", os.getenv("MLX_MODEL", "N/A"))
     logger.info("   Mode : publish")
+    logger.info("   Profile: %s", run_profile)
     logger.info("=" * 60)
     from pipeline_runner import run_pipeline
 
-    result, summary = run_pipeline(run_mode="publish")
+    result, summary = run_pipeline(run_mode="publish", run_profile=run_profile)
 
     # ── Log kết quả ─────────────────────────────────────────────────
     elapsed = summary["elapsed_seconds"]
@@ -67,6 +69,9 @@ def main() -> None:
     notion_count = summary["notion_count"]
     tg_sent = summary["telegram_sent"]
     report_path = summary["run_report_path"]
+    gather_snapshot_path = summary.get("gather_snapshot_path", "")
+    scored_snapshot_path = summary.get("scored_snapshot_path", "")
+    artifact_cleanup = dict(summary.get("artifact_cleanup", {}) or {})
 
     logger.info("─" * 60)
     logger.info("📊 Pipeline completed in %.1f seconds (%.1f minutes)", elapsed, elapsed / 60)
@@ -78,8 +83,19 @@ def main() -> None:
     logger.info("   Deep analysis done     : %d", len(result.get("analyzed_articles", [])))
     logger.info("   Notion pages created   : %d", notion_count)
     logger.info("   Telegram sent          : %s", "✅" if tg_sent else "⏭️ skipped")
+    if gather_snapshot_path:
+        logger.info("   Gather snapshot       : %s", gather_snapshot_path)
+    if scored_snapshot_path:
+        logger.info("   Scored snapshot       : %s", scored_snapshot_path)
     if report_path:
         logger.info("   Run report            : %s", report_path)
+    if artifact_cleanup.get("enabled"):
+        logger.info(
+            "   Artifact cleanup      : archived=%d kept=%d archive=%s",
+            int(artifact_cleanup.get("archived_count", 0) or 0),
+            int(artifact_cleanup.get("kept_count", 0) or 0),
+            artifact_cleanup.get("archive_root", ""),
+        )
     logger.info("=" * 60)
 
     # ── Print summary ra stdout ─────────────────────────────────────

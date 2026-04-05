@@ -19,7 +19,9 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from artifact_retention import build_artifact_cleanup_markdown, cleanup_runtime_artifacts
 from run_health import assess_run_health
+from source_history import batch_source_history_rows, load_source_history
 from xai_grok import (
     grok_source_gap_enabled,
     grok_source_gap_max_articles,
@@ -94,6 +96,18 @@ def _count_facebook_skip_reasons(articles: list[dict[str, Any]]) -> list[tuple[s
     return counter.most_common()
 
 
+def _count_delivery_skip_reasons(articles: list[dict[str, Any]]) -> list[tuple[str, int]]:
+    counter: Counter[str] = Counter()
+    for article in articles:
+        if not isinstance(article, dict):
+            continue
+        if str(article.get("delivery_decision", "") or "").strip().lower() != "skip":
+            continue
+        reason = str(article.get("delivery_skip_reason", "") or "").strip() or "unspecified"
+        counter[reason] += 1
+    return counter.most_common()
+
+
 def _compact_reason_value(value: Any, limit: int = 140) -> str:
     if isinstance(value, list):
         text = "; ".join(str(item or "") for item in value if str(item or "").strip())
@@ -135,8 +149,12 @@ def _build_run_report_markdown(state: dict[str, Any], generated_at: datetime) ->
     feedback_sync = dict(state.get("feedback_sync", {}) or {})
     grok_source_gap_suggestions = list(state.get("grok_source_gap_suggestions", []) or [])
     grok_source_gap_batch_note = str(state.get("grok_source_gap_batch_note", "") or "")
+    gather_snapshot_path = str(state.get("gather_snapshot_path", "") or "")
+    scored_snapshot_path = str(state.get("scored_snapshot_path", "") or "")
     run_health = dict(state.get("run_health", {}) or assess_run_health(state))
     health_metrics = dict(run_health.get("metrics", {}) or {})
+    source_history_map = load_source_history()
+    source_history_leaders, source_history_risky = batch_source_history_rows(scored_articles or raw_articles, source_history_map)
     report_time = generated_at.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
 
     lines = [
@@ -192,6 +210,14 @@ def _build_run_report_markdown(state: dict[str, Any], generated_at: datetime) ->
             lines.append(f"- {key}: {value}")
         lines.append("")
 
+    if gather_snapshot_path or scored_snapshot_path:
+        lines.extend(["## Temporal Snapshots", ""])
+        if gather_snapshot_path:
+            lines.append(f"- Gather snapshot: {gather_snapshot_path}")
+        if scored_snapshot_path:
+            lines.append(f"- Scored snapshot: {scored_snapshot_path}")
+        lines.append("")
+
     lines.extend(["## Feedback Loop", ""])
     lines.append(
         f"- Sync result: synced={feedback_sync.get('synced', 0)} skipped={feedback_sync.get('skipped', 0)} error={feedback_sync.get('error', '') or 'none'}"
@@ -214,8 +240,41 @@ def _build_run_report_markdown(state: dict[str, Any], generated_at: datetime) ->
     lines.extend(_counter_markdown("Telegram Candidates By Type", _count_by(telegram_candidates, "primary_type")))
     lines.extend(_counter_markdown("GitHub Topic Candidates By Type", _count_by(github_topic_candidates, "primary_type")))
     lines.extend(_counter_markdown("Facebook Topic Candidates By Type", _count_by(facebook_topic_candidates, "primary_type")))
+    lines.extend(_counter_markdown("Delivery Skip Reasons", _count_delivery_skip_reasons(final_articles)))
     lines.extend(_counter_markdown("Facebook Sort Mode Breakdown", _count_facebook_sort_modes(raw_articles)))
     lines.extend(_counter_markdown("Facebook Skip Reasons", _count_facebook_skip_reasons(final_articles)))
+
+    lines.extend(["## Source History Signals", ""])
+    if source_history_leaders:
+        lines.append("### Strong sources in this batch")
+        lines.append("")
+        for source in source_history_leaders:
+            lines.append(
+                "- "
+                f"{source.get('source_label', 'Unknown')} | "
+                f"domain={source.get('source_domain', '') or '(none)'} | "
+                f"quality={source.get('quality_score', 50)} | "
+                f"status={source.get('status', 'neutral')} | "
+                f"runs={source.get('runs_seen', 0)} | "
+                f"selection_rate={source.get('selection_rate', 0.0)}"
+            )
+    else:
+        lines.append("- Chưa có source history đủ dày để rút ra tín hiệu mạnh.")
+    if source_history_risky:
+        lines.append("")
+        lines.append("### Sources currently penalized")
+        lines.append("")
+        for source in source_history_risky:
+            lines.append(
+                "- "
+                f"{source.get('source_label', 'Unknown')} | "
+                f"domain={source.get('source_domain', '') or '(none)'} | "
+                f"quality={source.get('quality_score', 50)} | "
+                f"status={source.get('status', 'neutral')} | "
+                f"noise_rate={source.get('noise_rate', 0.0)} | "
+                f"penalty={source.get('penalty', 0)}"
+            )
+    lines.append("")
 
     lines.extend(["## Facebook Discovery", ""])
     lines.append(f"- Discovered sources: {len(facebook_discovered_sources)}")
@@ -305,6 +364,35 @@ def _build_run_report_markdown(state: dict[str, Any], generated_at: datetime) ->
             )
     else:
         lines.append("- Không có bài nào được chọn cho Telegram.")
+    lines.append("")
+
+    lines.extend(["## Skipped Candidates", ""])
+    skipped_articles = [
+        article for article in final_articles
+        if isinstance(article, dict) and str(article.get("delivery_decision", "") or "").strip().lower() == "skip"
+    ]
+    if skipped_articles:
+        skipped_articles = sorted(
+            skipped_articles,
+            key=lambda article: (
+                int(article.get("source_history_penalty", 0) or 0),
+                int(article.get("total_score", 0) or 0),
+            ),
+            reverse=True,
+        )
+        for article in skipped_articles[:12]:
+            lines.append(
+                "- "
+                f"[{article.get('primary_type', '?')}] "
+                f"{article.get('title', 'N/A')} | "
+                f"source={article.get('source_domain', article.get('source', ''))} | "
+                f"score={article.get('total_score', 0)} | "
+                f"skip_reason={article.get('delivery_skip_reason', '') or 'unspecified'} | "
+                f"history_quality={article.get('source_history_quality_score', 50)} | "
+                f"why={_compact_reason_value(article.get('delivery_rationale', ''))}"
+            )
+    else:
+        lines.append("- Không có bài nào bị skip ở delivery judge.")
     lines.append("")
 
     lines.extend(["## Top Deep Analysis Articles", ""])
@@ -405,6 +493,18 @@ def generate_run_report_node(state: dict[str, Any]) -> dict[str, Any]:
     report_markdown = _build_run_report_markdown(enriched_state, generated_at)
     report_path.write_text(report_markdown, encoding="utf-8")
 
+    artifact_cleanup = cleanup_runtime_artifacts(
+        state=enriched_state,
+        preserve_paths=[
+            report_path,
+            str(enriched_state.get("gather_snapshot_path", "") or ""),
+            str(enriched_state.get("scored_snapshot_path", "") or ""),
+        ],
+    )
+    cleanup_lines = build_artifact_cleanup_markdown(artifact_cleanup)
+    if cleanup_lines:
+        report_path.write_text(report_markdown.rstrip() + "\n\n" + "\n".join(cleanup_lines).rstrip() + "\n", encoding="utf-8")
+
     logger.info("🧾 Run report written: %s", report_path)
     return {
         "run_report_path": str(report_path),
@@ -412,4 +512,5 @@ def generate_run_report_node(state: dict[str, Any]) -> dict[str, Any]:
         "publish_ready": bool(run_health.get("publish_ready", False)),
         "grok_source_gap_suggestions": list(enriched_state.get("grok_source_gap_suggestions", []) or []),
         "grok_source_gap_batch_note": str(enriched_state.get("grok_source_gap_batch_note", "") or ""),
+        "artifact_cleanup": artifact_cleanup,
     }

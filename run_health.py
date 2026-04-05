@@ -47,6 +47,12 @@ def assess_run_health(state: dict[str, Any]) -> dict[str, Any]:
         for article in scored_articles
         if isinstance(article, dict)
     )
+    stale_scored = sum(1 for article in scored_articles if bool(article.get("is_old_news") or article.get("is_stale_candidate")))
+    penalized_sources = sum(
+        1
+        for article in scored_articles
+        if int(article.get("source_history_penalty", 0) or 0) >= 8
+    )
 
     strong_main_candidates = 0
     official_main_candidates = 0
@@ -83,6 +89,10 @@ def assess_run_health(state: dict[str, Any]) -> dict[str, Any]:
         add_issue("Batch đang bị GitHub chi phối quá mạnh so với media/official sources.", "yellow")
     if scored_articles and strong_scored < min(3, max(1, len(scored_articles) // 3)):
         add_issue("Coverage từ nguồn tier A/B còn mỏng.", "yellow")
+    if scored_articles and stale_scored >= max(3, len(scored_articles) // 4):
+        add_issue("Batch còn khá nhiều bài có dấu hiệu cũ/stale trước khi vào brief.", "yellow")
+    if scored_articles and penalized_sources >= max(3, len(scored_articles) // 5):
+        add_issue("Nhiều bài đang đến từ các nguồn có lịch sử noise cao.", "yellow")
     if telegram_candidates and strong_main_candidates == 0:
         add_issue("Main candidates chưa có nguồn tier A/B đủ rõ.", "red")
     if telegram_candidates and official_main_candidates == 0:
@@ -125,5 +135,7 @@ def assess_run_health(state: dict[str, Any]) -> dict[str, Any]:
             "community_source_count": source_kind_counter.get("community", 0),
             "watchlist_source_count": source_kind_counter.get("watchlist", 0),
             "search_source_count": source_kind_counter.get("search", 0),
+            "stale_scored_count": stale_scored,
+            "source_history_penalized_count": penalized_sources,
         },
     }

@@ -40,6 +40,7 @@ class DigestState(TypedDict, total=False):
     facebook_discovered_sources: list[dict[str, Any]]
     facebook_auto_active_sources: list[dict[str, Any]]
     facebook_candidate_sources: list[dict[str, Any]]
+    gather_snapshot_path: str
 
     # Bước 2: Sau deduplicate
     new_articles: list[dict[str, Any]]
@@ -52,6 +53,7 @@ class DigestState(TypedDict, total=False):
 
     # Bước 3: Sau classify + score
     scored_articles: list[dict[str, Any]]
+    scored_snapshot_path: str
 
     # Bước 4: Bài đủ điểm để phân tích sâu
     top_articles: list[dict[str, Any]]
@@ -94,6 +96,7 @@ class DigestState(TypedDict, total=False):
     publish_ready: bool
     grok_source_gap_suggestions: list[dict[str, Any]]
     grok_source_gap_batch_note: str
+    artifact_cleanup: dict[str, Any]
 
 
 # ── Node imports ─────────────────────────────────────────────────────

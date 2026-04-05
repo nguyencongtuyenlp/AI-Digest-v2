@@ -86,4 +86,81 @@ def apply_runtime_preset(profile: str, current: dict[str, Any]) -> dict[str, Any
         elif str(merged.get("runtime_mlx_model", "")).strip():
             merged["runtime_mlx_model"] = str(merged.get("runtime_mlx_model")).strip()
 
+    if normalized_profile in {"grok_smart", "smart"}:
+        # Grok Smart:
+        # - giữ backbone local + routing hiện tại
+        # - mở rộng shortlist và search rescue vừa phải để so output với mode thường
+        # - vẫn giữ budget cap để một run/ngày không phình chi phí quá mạnh
+        current_max_classify = _safe_int(merged.get("max_classify_articles", 10), 10)
+        current_max_deep = _safe_int(merged.get("max_deep_analysis_articles", 5), 5)
+        current_rss_hours = _safe_int(merged.get("gather_rss_hours", 72), 72)
+        current_github_repos = _safe_int(merged.get("github_max_watchlist_repos", 6), 6)
+        current_github_orgs = _safe_int(merged.get("github_max_orgs", 4), 4)
+        current_github_queries = _safe_int(merged.get("github_max_queries", 4), 4)
+        current_github_org_repos = _safe_int(merged.get("github_max_org_repos", 4), 4)
+        current_github_search = _safe_int(merged.get("github_max_search_results", 4), 4)
+        current_classify_chars = _safe_int(merged.get("classify_content_char_limit", 900), 900)
+        current_classify_tokens = _safe_int(merged.get("classify_max_tokens", 320), 320)
+
+        merged.update(
+            {
+                "max_classify_articles": min(16, max(12, current_max_classify)),
+                "max_deep_analysis_articles": min(6, max(5, current_max_deep)),
+                "gather_rss_hours": max(72, min(96, current_rss_hours)),
+                "github_max_watchlist_repos": min(8, max(6, current_github_repos)),
+                "github_max_orgs": min(5, max(4, current_github_orgs)),
+                "github_max_queries": min(5, max(4, current_github_queries)),
+                "github_max_org_repos": min(4, max(3, current_github_org_repos)),
+                "github_max_search_results": min(4, max(3, current_github_search)),
+                "classify_content_char_limit": min(1400, max(1100, current_classify_chars)),
+                "classify_max_tokens": min(480, max(360, current_classify_tokens)),
+                "skip_feedback_sync": False,
+                "enable_rss": True,
+                "enable_github": True,
+                "enable_watchlist": True,
+                "enable_ddg": True,
+                "enable_hn": True,
+                "enable_reddit": True,
+                "enable_telegram_channels": True,
+                "enable_grok_delivery_judge": True,
+                "grok_delivery_max_articles": 14,
+                "enable_grok_prefilter": True,
+                "grok_prefilter_max_articles": 24,
+                "enable_grok_final_editor": True,
+                "grok_final_editor_max_articles": 10,
+                "enable_grok_news_copy": True,
+                "grok_news_copy_max_articles": 24,
+                "enable_grok_facebook_score": True,
+                "grok_facebook_max_articles": 10,
+                "enable_grok_source_gap": True,
+                "grok_source_gap_max_articles": 14,
+                "enable_grok_scout": True,
+                "grok_scout_max_queries": 3,
+                "grok_scout_max_articles": 8,
+                "grok_scout_min_official_articles": 10,
+                "grok_scout_min_official_plus_media": 12,
+                "grok_scout_min_non_github_articles": 24,
+                "enable_facebook_auto": True,
+                "enable_social_signals": True,
+                "enable_grok_x_scout": True,
+                "grok_x_scout_max_queries": 3,
+                "grok_x_scout_max_articles": 6,
+                "grok_x_scout_allowed_handles": [
+                    "openai",
+                    "OpenAIDevs",
+                    "sama",
+                    "AnthropicAI",
+                    "GoogleDeepMind",
+                    "GoogleAI",
+                    "huggingface",
+                    "cursor_ai",
+                    "Replit",
+                    "MistralAI",
+                ],
+            }
+        )
+        smart_model = os.getenv("MLX_SMART_MODEL", "").strip()
+        if smart_model:
+            merged["runtime_mlx_model"] = smart_model
+
     return merged

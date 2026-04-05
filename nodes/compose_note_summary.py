@@ -26,14 +26,13 @@ Yêu cầu bắt buộc:
 - Viết bằng tiếng Việt.
 - Chỉ 1 đoạn, không bullet, không markdown.
 - Độ dài mục tiêu: 45-85 từ.
-- Đoạn tóm tắt nên nêu được 2 ý:
-  1. Diễn biến chính hoặc điểm mới của tin
-  2. Ý nghĩa trực tiếp với người làm sản phẩm/doanh nghiệp
+- Chỉ tóm tin: ai làm gì, nội dung/số liệu chính, bối cảnh đã nêu trong nguồn (nếu có).
+- Không đưa ý nghĩa cho “doanh nghiệp/độc giả phải làm gì”, không cảnh báo hay khuyên hành động; đó không phải vai trò của brief tin.
 - Chỉ được dùng thông tin có trong fact anchors, metadata nguồn, tóm tắt sẵn có và bài phân tích.
 - Không được biến inference thành fact.
 - Không lặp lại nguyên tiêu đề.
-- Giọng văn phải trung tính, chuyên nghiệp, giống bản tin ngắn.
-- Không dùng các cụm như: "ý chính của tin này là", "nên theo dõi", "nên thử", "cần thận trọng", "tín hiệu yếu", "nguồn tin chưa được xác thực", "dữ liệu yếu".
+- Giọng văn phải trung tính, chuyên nghiệp, giống bản tin ngắn (wire-style).
+- Không dùng các cụm như: "ý chính của tin này là", "nên theo dõi", "nên thử", "cần thận trọng", "cảnh báo", "doanh nghiệp cần", "tín hiệu yếu", "nguồn tin chưa được xác thực", "dữ liệu yếu", "Điều này có ý nghĩa với".
 - Không đưa khuyến nghị hành động hoặc chấm độ tin cậy nguồn, trừ khi đó là một phần của chính sự kiện.
 - Nếu thiếu dữ liệu, chỉ viết phần đã biết; không thêm boilerplate meta.
 """

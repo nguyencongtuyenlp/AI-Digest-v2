@@ -38,7 +38,9 @@ from typing import Any
 # Đảm bảo project root nằm trong sys.path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from mlx_runner import run_json_inference_meta
+from editorial_guardrails import sanitize_delivery_text
 from source_catalog import classify_source_kind
+from temporal_snapshots import write_temporal_snapshot
 from xai_grok import (
     grok_prefilter_enabled,
     grok_prefilter_max_articles,
@@ -673,14 +675,17 @@ def _classify_prose_rescue(article: dict[str, Any], raw: str, min_score: int) ->
 
     summary = " ".join(sentences[:2]).strip()
     if summary:
-        article["summary_vi"] = _clean_prose_snippet(summary, limit=260)
+        article["summary_vi"] = sanitize_delivery_text(_clean_prose_snippet(summary, limit=260), max_len=260)
 
     if len(sentences) >= 2:
-        article["editorial_angle"] = _clean_prose_snippet(sentences[1], limit=180)
+        article["editorial_angle"] = sanitize_delivery_text(_clean_prose_snippet(sentences[1], limit=180), max_len=180)
     else:
-        article["editorial_angle"] = _clean_prose_snippet(
+        article["editorial_angle"] = sanitize_delivery_text(
+            _clean_prose_snippet(
             f"Điểm đáng chú ý là {sentences[0][:140]}",
             limit=180,
+            ),
+            max_len=180,
         )
 
     if article.get("analysis_tier") == "skip" and int(article.get("total_score", 0) or 0) >= max(38, min_score - 22):
@@ -810,12 +815,17 @@ def _llm_failure_fallback(article: dict[str, Any], min_score: int) -> None:
     ):
         analysis_tier = "deep"
 
-    summary = "Tin này có tín hiệu đáng theo dõi nhưng model classify chưa trả JSON ổn định, nên hệ đang giữ ở mức fallback có kiểm soát."
-    editorial_angle = "Nên giữ bài này trong workspace review vì có tín hiệu founder-grade, nhưng chưa đủ chắc để kết luận mạnh."
+    summary = (
+        "Bài này ghi nhận một cập nhật mới trong hệ sinh thái AI, nhưng lượt classify hiện tại không trả JSON ổn định "
+        "nên hệ giữ ở chế độ fallback an toàn."
+    )
+    editorial_angle = (
+        "Điểm đáng chú ý là chủ đề và nguồn vẫn đủ rõ để giữ lại trong batch, nhưng phần diễn giải cần bám chặt dữ kiện sẵn có."
+    )
 
     if not ai_relevant:
         summary = "Tin này chưa đủ liên quan trực tiếp tới AI để ưu tiên cao trong brief hiện tại."
-        editorial_angle = "Không nên chiếm slot brief khi chưa có góc AI rõ ràng."
+        editorial_angle = "Bài này không phù hợp trọng tâm AI/product/business của brief sáng nay."
         analysis_tier = "skip"
 
     article.update(
@@ -838,6 +848,8 @@ def _llm_failure_fallback(article: dict[str, Any], min_score: int) -> None:
     _recompute_relevance_level(article)
     _normalize_primary_type(article)
     _normalize_article_tags(article)
+    article["summary_vi"] = sanitize_delivery_text(article.get("summary_vi", ""), max_len=260)
+    article["editorial_angle"] = sanitize_delivery_text(article.get("editorial_angle", ""), max_len=180)
 
 
 def _prefilter_score(article: dict[str, Any]) -> tuple[int, list[str]]:
@@ -861,6 +873,11 @@ def _prefilter_score(article: dict[str, Any]) -> tuple[int, list[str]]:
     source_priority = int(article.get("source_priority", 0) or 0)
     community_strength = int(article.get("community_signal_strength", 0) or 0)
     watchlist_hit = bool(article.get("watchlist_hit", False))
+    source_history_runs = int(article.get("source_history_runs", 0) or 0)
+    source_history_bonus = int(article.get("source_history_bonus", 0) or 0)
+    source_history_penalty = int(article.get("source_history_penalty", 0) or 0)
+    source_history_quality = int(article.get("source_history_quality_score", 50) or 50)
+    source_history_noise_rate = float(article.get("source_history_noise_rate", 0.0) or 0.0)
 
     tier_bonus = {"a": 10, "b": 7, "c": 3, "unknown": 1}.get(source_tier, 0)
     score += tier_bonus
@@ -878,6 +895,21 @@ def _prefilter_score(article: dict[str, Any]) -> tuple[int, list[str]]:
     if priority_bonus:
         score += priority_bonus
         reasons.append(f"source_kind:{source_kind}+{priority_bonus}")
+
+    if source_history_runs >= 3 and source_history_bonus > 0:
+        learned_bonus = min(2, source_history_bonus)
+        score += learned_bonus
+        reasons.append(f"source_history+{learned_bonus}")
+    if source_history_runs >= 3 and source_history_penalty > 0:
+        learned_penalty = min(6, source_history_penalty)
+        score -= learned_penalty
+        reasons.append(f"source_history-{learned_penalty}")
+    if source_history_runs >= 3 and source_history_quality <= 35 and source_kind in {"community", "search"}:
+        score -= 4
+        reasons.append("source_history_noise-4")
+    if source_history_runs >= 3 and source_history_noise_rate >= 0.35:
+        score -= 2
+        reasons.append("source_noise_rate-2")
 
     if watchlist_hit:
         score += 2
@@ -1161,28 +1193,32 @@ def _held_out_article_fallback(article: dict[str, Any]) -> None:
         "c3_reason": "Nếu chủ đề này xuất hiện lại ở nguồn mạnh hơn thì nên xét lại.",
         "total_score": total_score,
         "summary_vi": (
-            "Tin này hiện phù hợp để theo dõi thêm, chưa phải ưu tiên cao nhất trong lượt chọn hiện tại."
+            "Bài này mới dừng ở mức tín hiệu sơ bộ và chưa vượt được nhóm ứng viên mạnh hơn trong batch hiện tại."
+            if not strong_main_signal
+            else "Bài này ghi nhận một cập nhật mới có giá trị, nhưng vẫn đứng sau các tín hiệu mạnh hơn ở vòng shortlist chính."
         ),
         "editorial_angle": (
-            "Tạm thời chỉ nên theo dõi thêm và chờ tín hiệu rõ hơn từ nguồn mạnh."
+            "Giá trị hiện tại nằm ở việc bổ sung bối cảnh, chưa phải bài dẫn nhịp cho brief sáng."
             if not strong_main_signal
-            else "Nguồn và độ mới khá ổn, nên vẫn đáng cân nhắc ở lane review dù chưa được 32B chấm sâu."
+            else "Điểm đáng chú ý là nguồn và độ mới vẫn ổn, nên bài này còn hữu ích như một tín hiệu phụ của batch."
         ),
         "analysis_tier": "basic" if total_score >= (28 if strong_main_signal else 24) and ai_relevant else "skip",
         "tags": [],
     })
     if not ai_relevant:
         article["summary_vi"] = "Tin này chưa đủ liên quan trực tiếp tới AI để ưu tiên đưa vào brief."
-        article["editorial_angle"] = "Không nên chiếm slot brief khi chưa có góc AI rõ ràng."
+        article["editorial_angle"] = "Bài này không phù hợp trọng tâm AI/product/business của brief sáng nay."
         article["analysis_tier"] = "skip"
         article["total_score"] = min(article["total_score"], 20)
     if editorial_noise:
-        article["summary_vi"] = "Tin này lệch khá xa nhu cầu founder-grade hiện tại, nên không nên chiếm chỗ trong brief."
-        article["editorial_angle"] = "Bỏ qua ở vòng đầu để dành tài nguyên cho tín hiệu AI/product/business mạnh hơn."
+        article["summary_vi"] = "Bài này lệch khá xa trọng tâm AI/product/business của brief sáng nay."
+        article["editorial_angle"] = "Nội dung gần với noise bề mặt hơn là tín hiệu quyết định cho batch hiện tại."
         article["analysis_tier"] = "skip"
         article["total_score"] = min(article["total_score"], 8)
     _recompute_relevance_level(article)
     _normalize_article_tags(article)
+    article["summary_vi"] = sanitize_delivery_text(article.get("summary_vi", ""), max_len=260)
+    article["editorial_angle"] = sanitize_delivery_text(article.get("editorial_angle", ""), max_len=180)
 
 
 def _build_related_context(article: dict) -> str:
@@ -1247,6 +1283,13 @@ def _title_tokens(title: str) -> set[str]:
         if len(token) >= 3 and token not in TITLE_STOPWORDS
     }
     return tokens
+
+
+def _compact_title_slug(title: str) -> str:
+    """Chuỗi chữ-số-thường dùng để so khớp tiêu đề ngắn nằm trong tiêu đề dài."""
+    base = _normalize_key(title)
+    base = re.sub(r"[^a-z0-9]+", " ", base).strip()
+    return re.sub(r"\s+", " ", base)
 
 
 TAG_ALIAS_LOOKUP = {
@@ -1375,6 +1418,40 @@ def _apply_freshness_penalty(article: dict[str, Any], min_score: int) -> None:
     _recompute_relevance_level(article)
 
 
+def _apply_source_history_adjustment(article: dict[str, Any], min_score: int) -> None:
+    source_history_runs = int(article.get("source_history_runs", 0) or 0)
+    if source_history_runs < 3:
+        return
+
+    source_kind = str(article.get("source_kind", "unknown") or "unknown").lower()
+    source_history_bonus = int(article.get("source_history_bonus", 0) or 0)
+    source_history_penalty = int(article.get("source_history_penalty", 0) or 0)
+    noise_rate = float(article.get("source_history_noise_rate", 0.0) or 0.0)
+    total_score = int(article.get("total_score", 0) or 0)
+    adjustment = 0
+
+    if source_history_penalty > 0 and source_kind in {"community", "search"}:
+        adjustment -= min(8, source_history_penalty + (2 if noise_rate >= 0.35 else 0))
+    elif source_history_bonus > 0 and source_kind in {"official", "strong_media", "watchlist"}:
+        if not article.get("is_old_news") and not article.get("is_stale_candidate"):
+            adjustment += min(4, source_history_bonus)
+
+    if adjustment == 0:
+        return
+
+    article["source_history_adjustment"] = adjustment
+    article["total_score"] = max(0, min(100, total_score + adjustment))
+    if adjustment < 0:
+        if article.get("analysis_tier") == "deep" and article["total_score"] < min_score:
+            article["analysis_tier"] = "basic"
+        if article.get("analysis_tier") == "basic" and article["total_score"] < 28:
+            article["analysis_tier"] = "skip"
+    elif adjustment > 0 and article.get("analysis_tier") == "basic" and article["total_score"] >= max(40, min_score - 4):
+        article["analysis_tier"] = "deep"
+
+    _recompute_relevance_level(article)
+
+
 def _build_score_breakdown(article: dict[str, Any]) -> dict[str, Any]:
     prefilter_reasons = [str(reason or "") for reason in article.get("prefilter_reasons", [])]
     c1_reason = str(article.get("c1_reason", "") or "")
@@ -1395,8 +1472,13 @@ def _build_score_breakdown(article: dict[str, Any]) -> dict[str, Any]:
     return {
         "source_kind": source_kind,
         "source_priority": int(article.get("source_priority", 0) or 0),
+        "source_priority_base": int(article.get("source_priority_base", article.get("source_priority", 0)) or 0),
         "community_signal_strength": int(article.get("community_signal_strength", 0) or 0),
         "watchlist_hit": bool(article.get("watchlist_hit", False)),
+        "source_history_quality_score": int(article.get("source_history_quality_score", 50) or 50),
+        "source_history_bonus": int(article.get("source_history_bonus", 0) or 0),
+        "source_history_penalty": int(article.get("source_history_penalty", 0) or 0),
+        "source_history_adjustment": int(article.get("source_history_adjustment", 0) or 0),
         "prefilter_score": int(article.get("prefilter_score", 0) or 0),
         "c1_score": int(article.get("c1_score", 0) or 0),
         "c2_score": int(article.get("c2_score", 0) or 0),
@@ -1406,7 +1488,7 @@ def _build_score_breakdown(article: dict[str, Any]) -> dict[str, Any]:
         "why_skipped": [
             reason
             for reason in prefilter_reasons
-            if reason.startswith(("editorial_noise", "blocked_domain", "soft_blocked_domain", "not_ai_relevant", "stale", "old_news"))
+            if reason.startswith(("editorial_noise", "blocked_domain", "soft_blocked_domain", "not_ai_relevant", "stale", "old_news", "source_history"))
         ][:5],
     }
 
@@ -1428,6 +1510,21 @@ def _articles_same_event(left: dict[str, Any], right: dict[str, Any]) -> bool:
     # Nếu title overlap đủ mạnh và có ít nhất 3 token chung, coi là cùng event.
     if len(intersection) >= 3 and jaccard >= 0.4:
         return True
+
+    # Toàn bộ token phía tiêu đề ngắn nằm trong tiêu đề dài (vd: "OpenAI acquires TBPN"
+    # vs bài dài cùng cụm đầu) — Jaccard thấp vì phía dài thêm nhiều từ phụ.
+    if len(left_tokens) <= len(right_tokens) and left_tokens <= right_tokens and len(left_tokens) >= 3:
+        return True
+    if len(right_tokens) <= len(left_tokens) and right_tokens <= left_tokens and len(right_tokens) >= 3:
+        return True
+
+    # Chuỗi slug: tiêu đề ngắn (đủ dài) là tiền tố nằm trong tiêu đề dài sau chuẩn hóa.
+    ca = _compact_title_slug(str(left.get("title", "") or ""))
+    cb = _compact_title_slug(str(right.get("title", "") or ""))
+    if len(ca) >= 18 and len(cb) >= 18:
+        shorter, longer = (ca, cb) if len(ca) <= len(cb) else (cb, ca)
+        if shorter in longer:
+            return True
 
     return False
 
@@ -1711,6 +1808,7 @@ def classify_and_score_node(state: dict[str, Any]) -> dict[str, Any]:
                 })
                 _apply_strategic_boost(article, min_score)
                 _apply_freshness_penalty(article, min_score)
+                _apply_source_history_adjustment(article, min_score)
                 _normalize_primary_type(article)
                 _normalize_article_tags(article)
                 article["score_breakdown"] = _build_score_breakdown(article)
@@ -1718,11 +1816,13 @@ def classify_and_score_node(state: dict[str, Any]) -> dict[str, Any]:
             else:
                 logger.warning("⚠️ Model không trả JSON cho '%s'", title[:40])
                 _classify_prose_rescue(article, raw_output, min_score)
+                _apply_source_history_adjustment(article, min_score)
                 article["score_breakdown"] = _build_score_breakdown(article)
                 article["why_surfaced"] = article["score_breakdown"]["why_surfaced"]
         except Exception as e:
             logger.error("❌ Classify failed: '%s': %s", title[:40], e)
             _llm_failure_fallback(article, min_score)
+            _apply_source_history_adjustment(article, min_score)
             article["score_breakdown"] = _build_score_breakdown(article)
             article["why_surfaced"] = article["score_breakdown"]["why_surfaced"]
 
@@ -1730,6 +1830,7 @@ def classify_and_score_node(state: dict[str, Any]) -> dict[str, Any]:
 
     for article in held_out_articles:
         _held_out_article_fallback(article)
+        _apply_source_history_adjustment(article, min_score)
         article["score_breakdown"] = _build_score_breakdown(article)
         article["why_skipped"] = article["score_breakdown"]["why_skipped"] or article["score_breakdown"]["why_surfaced"][:2]
         scored.append(article)
@@ -1750,9 +1851,24 @@ def classify_and_score_node(state: dict[str, Any]) -> dict[str, Any]:
         "✅ Classify+Score xong: %d bài / %d event → %d top (≥%d) + %d low",
         len(scored), len(primary_event_articles), len(top), min_score, len(low)
     )
+    scored_snapshot_path = write_temporal_snapshot(
+        state=state,
+        stage="scored",
+        articles=scored,
+        extra={
+            "scored_count": len(scored),
+            "primary_event_count": len(primary_event_articles),
+            "top_count": len(top),
+            "low_score_count": len(low),
+            "min_deep_analysis_score": min_score,
+            "max_deep_analysis_articles": max_top,
+            "max_classify_articles": max_classify,
+        },
+    )
 
     return {
         "scored_articles": scored,
         "top_articles": top,
         "low_score_articles": low,
+        "scored_snapshot_path": scored_snapshot_path,
     }

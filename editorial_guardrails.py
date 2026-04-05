@@ -9,6 +9,7 @@ fallback when the LLM over-infers or formats output poorly.
 from __future__ import annotations
 
 import re
+import unicodedata
 from datetime import date, datetime
 from html import escape, unescape
 from typing import Any
@@ -58,6 +59,30 @@ INTERNAL_COPY_PATTERNS = (
     ),
     (
         re.compile(r"\b(?:Team|Doanh nghiệp|Startup|Người làm sản phẩm|Người vận hành)[^.]*\bnên\b[^.]*\.?", re.IGNORECASE),
+        "",
+    ),
+    (
+        re.compile(r"\s*Điều này cảnh báo[^.]*\.?", re.IGNORECASE),
+        "",
+    ),
+    (
+        re.compile(r"\s*Điều này có ý nghĩa trực tiếp với[^.]*\.?", re.IGNORECASE),
+        "",
+    ),
+    (
+        re.compile(r"\s*các doanh nghiệp cần[^.]*\.?", re.IGNORECASE),
+        "",
+    ),
+    (
+        re.compile(r"\s*Tuy nhiên,\s*cần xem xét kỹ[^.]*\.?", re.IGNORECASE),
+        "",
+    ),
+    (
+        re.compile(r"\s*Sản phẩm/doanh nghiệp cần[^.]*\.?", re.IGNORECASE),
+        "",
+    ),
+    (
+        re.compile(r"\s*Điều này cho thấy doanh nghiệp[^.]*\.?", re.IGNORECASE),
         "",
     ),
     (
@@ -291,6 +316,109 @@ def _normalize_link_url(value: Any) -> str:
     )
 
 
+# Khớp với nodes.classify_and_score TITLE_STOPWORDS (tránh import vòng).
+_DIGEST_TITLE_STOPWORDS = frozenset(
+    {
+        "the",
+        "a",
+        "an",
+        "and",
+        "or",
+        "for",
+        "with",
+        "into",
+        "from",
+        "that",
+        "this",
+        "news",
+        "today",
+        "latest",
+        "update",
+        "updates",
+        "report",
+        "reports",
+        "says",
+        "new",
+        "launches",
+        "launch",
+        "announces",
+        "introduces",
+        "about",
+        "after",
+        "tai",
+        "cua",
+        "cho",
+        "voi",
+        "trong",
+        "mot",
+        "nhung",
+        "nhat",
+        "moi",
+        "bao",
+        "ve",
+        "sau",
+        "tren",
+        "khi",
+        "nguoi",
+        "viet",
+        "nam",
+        "tri",
+        "tue",
+        "nhan",
+        "tao",
+    }
+)
+
+
+def _digest_normalize_key(text: str) -> str:
+    ascii_text = unicodedata.normalize("NFKD", str(text or "")).encode("ascii", "ignore").decode("ascii")
+    return ascii_text.lower()
+
+
+def _digest_title_tokens(title: str) -> set[str]:
+    normalized = _digest_normalize_key(title)
+    return {
+        token
+        for token in re.findall(r"[a-z0-9]+", normalized)
+        if len(token) >= 3 and token not in _DIGEST_TITLE_STOPWORDS
+    }
+
+
+def _digest_compact_title_slug(title: str) -> str:
+    base = _digest_normalize_key(title)
+    base = re.sub(r"[^a-z0-9]+", " ", base).strip()
+    return re.sub(r"\s+", " ", base)
+
+
+def digest_titles_same_story(title_a: str, title_b: str) -> bool:
+    """
+    Hai tiêu đề có cùng một sự kiện (tin ngắn + bài dài cùng lead) — dùng trong brief deterministic.
+    Logic bám sát _articles_same_event ở classify_and_score.
+    """
+    left_tokens = _digest_title_tokens(title_a)
+    right_tokens = _digest_title_tokens(title_b)
+    if not left_tokens or not right_tokens:
+        return False
+    intersection = left_tokens & right_tokens
+    union = left_tokens | right_tokens
+    jaccard = len(intersection) / max(1, len(union))
+    if jaccard >= 0.6:
+        return True
+    if len(intersection) >= 3 and jaccard >= 0.4:
+        return True
+    if len(left_tokens) <= len(right_tokens) and left_tokens <= right_tokens and len(left_tokens) >= 3:
+        return True
+    if len(right_tokens) <= len(left_tokens) and right_tokens <= left_tokens and len(right_tokens) >= 3:
+        return True
+    ca = _digest_compact_title_slug(title_a)
+    cb = _digest_compact_title_slug(title_b)
+    if len(ca) >= 18 and len(cb) >= 18:
+        shorter, longer = (ca, cb) if len(ca) <= len(cb) else (cb, ca)
+        if shorter in longer:
+            return True
+    return False
+
+
 def _archive_is_ai_core(article: dict[str, Any], domain: str) -> bool:
     """Giữ archive replay bám AI-core để preview nhìn như một brief thật."""
     title = _clean_text(article.get("title", ""), 260)
@@ -352,6 +480,22 @@ def _prepare_archive_articles(history_articles: list[dict[str, Any]]) -> list[di
     return prepared
 
 
+def _selected_covers_same_story(
+    selected: list[dict[str, Any]],
+    article: dict[str, Any],
+) -> bool:
+    """Đã có bài trong section cùng event (event_id hoặc tiêu đề gần trùng)."""
+    eid = str(article.get("event_id") or "").strip()
+    if eid:
+        for keep in selected:
+            if str(keep.get("event_id") or "").strip() == eid:
+                return True
+    title_new = str(article.get("title", "") or "")
+    if not title_new:
+        return False
+    return any(digest_titles_same_story(title_new, str(keep.get("title", "") or "")) for keep in selected)
+
+
 def _select_section_articles(
     current_articles: list[dict[str, Any]],
     archive_articles: list[dict[str, Any]],
@@ -389,7 +533,26 @@ def _select_section_articles(
         reverse=True,
     )
 
-    selected: list[dict[str, Any]] = current_bucket[:per_type]
+    # Dedup trong bucket hiện tại (tránh trùng title/url ngay cả khi current_bucket có lẫn nhau).
+    selected: list[dict[str, Any]] = []
+    seen_urls_now: set[str] = set()
+    seen_titles_now: set[str] = set()
+    for article in current_bucket:
+        url_norm = _normalize_link_url(article.get("url", ""))
+        title_norm = str(article.get("title", "") or "").strip().lower()
+        if url_norm and url_norm in seen_urls_now:
+            continue
+        if title_norm and title_norm in seen_titles_now:
+            continue
+        if _selected_covers_same_story(selected, article):
+            continue
+        if url_norm:
+            seen_urls_now.add(url_norm)
+        if title_norm:
+            seen_titles_now.add(title_norm)
+        selected.append(article)
+        if len(selected) >= per_type:
+            break
     if allow_high_priority_overflow and current_bucket:
         selected_ids = {id(article) for article in selected}
         overflow_candidates = [
@@ -398,20 +561,22 @@ def _select_section_articles(
             if id(article) not in selected_ids
             and str(article.get("delivery_decision", "") or "").lower() == "include"
             and (
-                int(article.get("grok_final_rank_score", -1) or -1) >= 90
-                or int(article.get("grok_priority_score", -1) or -1) >= 88
+                int(article.get("grok_final_rank_score", -1) or -1) >= 75
+                or int(article.get("grok_priority_score", -1) or -1) >= 72
                 or (
-                    int(article.get("grok_priority_score", -1) or -1) >= 82
-                    and int(article.get("total_score", 0) or 0) >= 80
+                    int(article.get("grok_priority_score", -1) or -1) >= 60
+                    and int(article.get("total_score", 0) or 0) >= 50
                 )
                 or (
-                    int(article.get("delivery_score", 0) or 0) >= 13
-                    and int(article.get("total_score", 0) or 0) >= 78
+                    int(article.get("delivery_score", 0) or 0) >= 11
+                    and int(article.get("total_score", 0) or 0) >= 45
                 )
             )
         ]
-        if overflow_candidates:
-            selected.append(overflow_candidates[0])
+        for overflow_article in overflow_candidates[:2]:
+            if _selected_covers_same_story(selected, overflow_article):
+                continue
+            selected.append(overflow_article)
 
     archive_limit = per_type if selected else min(per_type, 2)
     if len(selected) >= per_type:
@@ -422,17 +587,20 @@ def _select_section_articles(
     if not allow_archive_replay:
         return selected
 
-    seen_urls = {str(article.get("url", "") or "") for article in selected}
-    seen_titles = {str(article.get("title", "") or "") for article in selected}
+    # Dedup cho archive replay:
+    # - tránh trùng với selected (current)
+    # - tránh trùng nội bộ trong archive_bucket (nhiều entry cũ cùng một title/url)
+    seen_urls = {_normalize_link_url(article.get("url", "")) for article in selected if article.get("url")}
+    seen_titles = {str(article.get("title", "") or "").strip().lower() for article in selected if article.get("title")}
 
     archive_bucket = []
     for article in archive_articles:
         canonical_type = canonical_type_name(article.get("primary_type"))
         if canonical_type != section_type:
             continue
-        url = str(article.get("url", "") or "")
-        title = str(article.get("title", "") or "")
-        if not title or url in seen_urls or title in seen_titles:
+        url_norm = _normalize_link_url(article.get("url", ""))
+        title_norm = str(article.get("title", "") or "").strip().lower()
+        if not title_norm or (url_norm and url_norm in seen_urls) or title_norm in seen_titles:
             continue
         normalized = dict(article)
         normalized["primary_type"] = canonical_type
@@ -448,10 +616,21 @@ def _select_section_articles(
         reverse=True,
     )
 
-    for article in archive_bucket[:archive_limit]:
-        selected.append(article)
+    for article in archive_bucket:
         if len(selected) >= archive_limit:
             break
+        url_norm = _normalize_link_url(article.get("url", ""))
+        title_norm = str(article.get("title", "") or "").strip().lower()
+        # Kiểm tra lại để tránh trùng nội bộ archive_bucket.
+        if (url_norm and url_norm in seen_urls) or (title_norm and title_norm in seen_titles):
+            continue
+        if _selected_covers_same_story(selected, article):
+            continue
+        selected.append(article)
+        if url_norm:
+            seen_urls.add(url_norm)
+        if title_norm:
+            seen_titles.add(title_norm)
 
     return selected
 
