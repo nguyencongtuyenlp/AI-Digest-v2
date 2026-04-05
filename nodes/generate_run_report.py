@@ -106,7 +106,9 @@ def _count_delivery_skip_reasons(articles: list[dict[str, Any]]) -> list[tuple[s
             continue
         if str(article.get("delivery_decision", "") or "").strip().lower() != "skip":
             continue
-        reason = str(article.get("delivery_skip_reason", "") or "").strip() or "unspecified"
+        reason = str(article.get("delivery_skip_reason", "") or "").strip()
+        if not reason:
+            continue
         counter[reason] += 1
     return counter.most_common()
 
@@ -362,7 +364,7 @@ def _build_run_report_markdown(state: dict[str, Any], generated_at: datetime) ->
                 f"{article.get('title', 'N/A')} | "
                 f"source={article.get('source_domain', article.get('source', ''))} | "
                 f"score={article.get('total_score', 0)} | "
-                f"skip_reason={article.get('delivery_skip_reason', '') or 'unspecified'} | "
+                f"skip_reason={article.get('delivery_skip_reason', '') or '-'} | "
                 f"history_quality={article.get('source_history_quality_score', 50)} | "
                 f"why={_compact_reason_value(article.get('delivery_rationale', ''))}"
             )

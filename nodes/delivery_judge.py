@@ -164,6 +164,16 @@ def _runtime_int(runtime_config: dict[str, Any], runtime_key: str, env_key: str,
         return default
 
 
+def _project_fit_bucket(article: dict[str, Any]) -> str:
+    explicit = str(article.get("project_fit", "") or "").strip().lower()
+    if explicit in {"high", "medium", "low"}:
+        return explicit
+    relevance = str(article.get("relevance_level", "") or "").strip().lower()
+    if relevance in {"high", "medium", "low"}:
+        return relevance
+    return "low"
+
+
 def _deterministic_delivery_assessment(article: dict[str, Any]) -> dict[str, Any]:
     score = int(article.get("total_score", 0) or 0)
     source_tier = str(article.get("source_tier", "unknown")).lower()
@@ -179,10 +189,7 @@ def _deterministic_delivery_assessment(article: dict[str, Any]) -> dict[str, Any
     event_cluster_size = int(article.get("event_cluster_size", 1) or 1)
     is_ai_relevant = article.get("is_ai_relevant", True) is not False
     title = str(article.get("title", "") or "")
-    source_history_penalty = int(article.get("source_history_penalty", 0) or 0)
-    source_history_bonus = int(article.get("source_history_bonus", 0) or 0)
-    source_history_noise_rate = float(article.get("source_history_noise_rate", 0.0) or 0.0)
-    source_history_status = str(article.get("source_history_status", "") or "").strip().lower()
+    project_fit = _project_fit_bucket(article)
 
     groundedness_score = 4 if confidence == "high" else 3 if confidence == "medium" else 2
     freshness_score = 0 if is_stale_candidate else 2 if freshness_unknown else 4
@@ -219,38 +226,19 @@ def _deterministic_delivery_assessment(article: dict[str, Any]) -> dict[str, Any
             "skip_reason": "duplicate_event",
         }
 
-    if is_stale_candidate:
-        decision = "review" if source_tier == "a" and score >= 80 else "skip"
+    if (
+        is_stale_candidate
+        or is_old_news
+        or freshness_bucket in {"aging", "stale"}
+        or (isinstance(age_hours, (int, float)) and age_hours > 120)
+    ):
         return {
             "groundedness_score": groundedness_score,
-            "freshness_score": freshness_score,
-            "operator_value_score": operator_value_score,
-            "decision": decision,
-            "rationale": "Bài có dấu hiệu cũ, chỉ nên giữ nếu thật sự là nguồn mạnh và còn giá trị quyết định.",
-            "skip_reason": "old" if decision == "skip" else "review_old",
-        }
-
-    if is_old_news or freshness_bucket in {"aging", "stale"}:
-        decision = "review" if source_tier == "a" and score >= 75 and confidence != "low" else "skip"
-        return {
-            "groundedness_score": groundedness_score,
-            "freshness_score": 1 if decision == "review" else 0,
-            "operator_value_score": operator_value_score,
-            "decision": decision,
-            "rationale": (
-                "Bài không còn đủ mới cho brief buổi sáng, chỉ giữ nếu là nguồn mạnh và vẫn còn giá trị quyết định."
-            ),
-            "skip_reason": "old" if decision == "skip" else "review_old",
-        }
-
-    if freshness_unknown and source_tier == "c":
-        return {
-            "groundedness_score": groundedness_score,
-            "freshness_score": freshness_score,
+            "freshness_score": 0,
             "operator_value_score": operator_value_score,
             "decision": "skip",
-            "rationale": "Nguồn yếu và không rõ độ mới, không phù hợp để lên brief.",
-            "skip_reason": "weak_source",
+            "rationale": "Bài đã cũ hơn ngưỡng brief buổi sáng hiện tại.",
+            "skip_reason": "old",
         }
 
     if source_kind == "community" and COMMUNITY_SPECULATION_TITLE_RE.search(title):
@@ -263,61 +251,7 @@ def _deterministic_delivery_assessment(article: dict[str, Any]) -> dict[str, Any
             "skip_reason": "speculation",
         }
 
-    if source_kind == "community" and (freshness_unknown or confidence == "low") and score < 60:
-        return {
-            "groundedness_score": max(1, groundedness_score - 1),
-            "freshness_score": freshness_score,
-            "operator_value_score": operator_value_score,
-            "decision": "review" if score >= 55 else "skip",
-            "rationale": "Bài cộng đồng còn mỏng hoặc thiếu độ mới rõ ràng, không nên ưu tiên cho main brief.",
-            "skip_reason": "weak_signal" if score < 55 else "",
-        }
-
-    if source_history_penalty >= 8 and source_kind in {"community", "search"} and score < 70:
-        return {
-            "groundedness_score": max(1, groundedness_score - 1),
-            "freshness_score": freshness_score,
-            "operator_value_score": max(0, operator_value_score - 1),
-            "decision": "skip",
-            "rationale": "Nguồn này có lịch sử cho ra nhiều tín hiệu yếu hoặc cũ, nên bài chưa đủ mạnh để vào main brief.",
-            "skip_reason": "weak_source_history",
-        }
-
-    if source_history_noise_rate >= 0.35 and source_kind in {"community", "search"} and score < 75:
-        return {
-            "groundedness_score": max(1, groundedness_score - 1),
-            "freshness_score": freshness_score,
-            "operator_value_score": max(0, operator_value_score - 1),
-            "decision": "review" if score >= 68 else "skip",
-            "rationale": "Nguồn này gần đây có tỷ lệ noise cao, nên bài cần tiêu chuẩn chặt hơn bình thường.",
-            "skip_reason": "weak_source_history" if score < 68 else "",
-        }
-
-    if source_history_bonus > 0 and source_history_status in {"trusted", "positive"} and source_kind in {"official", "strong_media"}:
-        groundedness_score = min(5, groundedness_score + 1)
-        operator_value_score = min(5, operator_value_score + 1)
-
-    if ROUNDUP_TITLE_RE.search(title) and (freshness_unknown or is_old_news or freshness_bucket in {"aging", "stale"}):
-        return {
-            "groundedness_score": groundedness_score,
-            "freshness_score": 1 if not is_stale_candidate else 0,
-            "operator_value_score": max(1, operator_value_score - 1),
-            "decision": "review" if source_tier == "a" and score >= 70 else "skip",
-            "rationale": "Bài dạng roundup/recap không còn đủ sắc độ mới để ưu tiên ở main brief.",
-            "skip_reason": "roundup",
-        }
-
-    if EVENT_PROMO_TITLE_RE.search(title) and source_kind not in {"official"}:
-        return {
-            "groundedness_score": groundedness_score,
-            "freshness_score": freshness_score,
-            "operator_value_score": max(0, operator_value_score - 1),
-            "decision": "skip",
-            "rationale": "Bài mang tính event promo/đăng ký tham dự, không phù hợp cho main news brief.",
-            "skip_reason": "promo",
-        }
-
-    if score < 35 or (confidence == "low" and not content_available):
+    if score < 40 or (confidence == "low" and not content_available):
         return {
             "groundedness_score": groundedness_score,
             "freshness_score": freshness_score,
@@ -330,23 +264,17 @@ def _deterministic_delivery_assessment(article: dict[str, Any]) -> dict[str, Any
     if isinstance(age_hours, (int, float)) and age_hours <= 72:
         freshness_score = min(5, freshness_score + 1)
 
-    avg = (groundedness_score + freshness_score + operator_value_score) / 3
-
-    if avg >= 3.0 and score >= 40:
+    if score >= 55 or (score >= 45 and project_fit in {"high", "medium"}):
         decision = "include"
-    elif source_kind in {"official", "strong_media"} and avg >= 2.8 and score >= 35:
-        decision = "include"
-    elif source_kind == "github" and avg >= 2.9 and score >= 48:
-        decision = "include"
-    elif avg >= 2.5 or (score >= 42 and str(article.get("relevance_level", "") or "").lower() == "high"):
-        decision = "review"
-    else:
+    elif score < 40:
         decision = "skip"
+    else:
+        decision = "review"
 
     rationale = (
         "Đủ mạnh để đưa vào brief."
         if decision == "include"
-        else "Nên review thêm trước khi đưa vào brief."
+        else "Chưa đủ điểm để đưa thẳng vào brief, nhưng vẫn nên giữ lại ở lớp review."
         if decision == "review"
         else "Tín hiệu yếu hoặc thiếu bằng chứng để chiếm chỗ trong brief."
     )
@@ -583,25 +511,19 @@ def _infer_skip_reason_from_article(article: dict[str, Any]) -> str:
         if part
     ).lower()
 
-    if any(token in rationale for token in ("lane phụ", "lane phu")):
-        return "lane_locked"
     if any(token in rationale for token in ("trùng event", "trung event")):
         return "duplicate_event"
     if any(token in rationale for token in ("đồn đoán", "speculation", "rumor", "leak")):
         return "speculation"
-    if any(token in rationale for token in ("event promo", "đăng ký", "register", "webinar", "promo")):
-        return "promo"
     if any(token in rationale for token in ("không còn đủ mới", "dấu hiệu cũ", "bị ghim", "không còn mới")):
         return "old"
-    if any(token in rationale for token in ("nguồn yếu", "tỷ lệ noise", "noise cao")):
-        return "weak_source_history"
     if any(token in rationale for token in ("không đủ liên quan", "liên quan trực tiếp tới ai")):
         return "not_ai"
     if any(token in rationale for token in ("tín hiệu yếu", "quá mỏng", "quá yếu")):
         return "weak_signal"
-    if any(token in rationale for token in ("không đủ mạnh", "chưa đủ mạnh", "chưa đủ sắc", "chưa vượt trội")):
-        return "editorial_cut"
-    return "editorial_cut"
+    if int(article.get("total_score", 0) or 0) < 40:
+        return "weak_signal"
+    return ""
 
 
 def _candidate_sort_key(article: dict[str, Any]) -> tuple[int, int, int]:
@@ -611,104 +533,6 @@ def _candidate_sort_key(article: dict[str, Any]) -> tuple[int, int, int]:
         int(article.get("total_score", 0) or 0),
         int(article.get("event_source_count", 1) or 1),
     )
-
-
-def _review_rescue_sort_key(article: dict[str, Any]) -> tuple[int, int, int, int, int]:
-    relevance = str(article.get("relevance_level", "") or "").strip().lower()
-    source_tier = str(article.get("source_tier", "") or "").strip().lower()
-    return (
-        1 if relevance == "high" else 0,
-        1 if source_tier in {"a", "b"} else 0,
-        int(article.get("grok_priority_score", -1) or -1),
-        int(article.get("delivery_score", 0) or 0),
-        int(article.get("total_score", 0) or 0),
-    )
-
-
-def _is_promotable_review(article: dict[str, Any]) -> bool:
-    if str(article.get("delivery_decision", "") or "").strip().lower() != "review":
-        return False
-    if article.get("is_ai_relevant") is False or not bool(article.get("event_is_primary", True)):
-        return False
-    if _is_facebook_topic_article(article):
-        return False
-
-    source_kind = str(article.get("source_kind", "") or "").strip().lower()
-    source_tier = str(article.get("source_tier", "") or "").strip().lower()
-    relevance = str(article.get("relevance_level", "") or "").strip().lower()
-    score = int(article.get("total_score", 0) or 0)
-    stale = bool(article.get("is_stale_candidate", False) or article.get("is_old_news", False))
-
-    if stale and not (source_tier == "a" and score >= 72):
-        return False
-    if score >= 58:
-        return True
-    if relevance == "high" and score >= 45:
-        return True
-    if source_kind in {"official", "strong_media", "review"} and score >= 45:
-        return True
-    if source_kind == "github" and score >= 52:
-        return True
-    if int(article.get("grok_priority_score", -1) or -1) >= 62 and score >= 42:
-        return True
-    return False
-
-
-def _promote_review_articles(reviewed_articles: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    promoted_pool = [
-        article for article in reviewed_articles
-        if article.get("delivery_decision") == "include"
-        and not _is_facebook_topic_article(article)
-    ]
-    promotable_reviews = [
-        article for article in reviewed_articles
-        if _is_promotable_review(article)
-    ]
-    if not promotable_reviews:
-        return promoted_pool
-
-    current_types = {
-        canonical_type_name(article.get("primary_type"))
-        for article in promoted_pool
-        if canonical_type_name(article.get("primary_type"))
-    }
-    rescued: list[dict[str, Any]] = []
-    rescue_target = max(5, len(promoted_pool))
-
-    for lane in ("Product", "Society & Culture", "Practical"):
-        if lane in current_types:
-            continue
-        lane_candidates = sorted(
-            [
-                article for article in promotable_reviews
-                if canonical_type_name(article.get("primary_type")) == lane
-            ],
-            key=_review_rescue_sort_key,
-            reverse=True,
-        )
-        if not lane_candidates:
-            continue
-        article = lane_candidates[0]
-        article["delivery_decision"] = "include"
-        article["delivery_promoted_from_review"] = True
-        article["delivery_skip_reason"] = ""
-        article["delivery_rationale"] = "Bài được kéo lên main brief để giữ lane này không bị rỗng và vẫn đủ đáng đọc."
-        rescued.append(article)
-        current_types.add(lane)
-
-    if len(promoted_pool) + len(rescued) < rescue_target:
-        for article in sorted(promotable_reviews, key=_review_rescue_sort_key, reverse=True):
-            if article in rescued:
-                continue
-            article["delivery_decision"] = "include"
-            article["delivery_promoted_from_review"] = True
-            article["delivery_skip_reason"] = ""
-            article["delivery_rationale"] = "Bài được kéo từ lớp review lên main brief để batch không bỏ sót tín hiệu mạnh."
-            rescued.append(article)
-            if len(promoted_pool) + len(rescued) >= rescue_target:
-                break
-
-    return promoted_pool + rescued
 
 
 def _sync_primary_type(article: dict[str, Any]) -> None:
@@ -955,7 +779,11 @@ def delivery_judge_node(state: dict[str, Any]) -> dict[str, Any]:
         runtime_config=runtime_config,
         feedback_summary_text=str(state.get("feedback_summary_text", "") or ""),
     )
-    main_include_articles = _promote_review_articles(reviewed_articles)
+    main_include_articles = [
+        article for article in reviewed_articles
+        if article.get("delivery_decision") == "include"
+        and not _is_facebook_topic_article(article)
+    ]
 
     telegram_candidates = _select_diverse_candidates(
         main_include_articles,
