@@ -248,6 +248,16 @@ def _deterministic_delivery_assessment(article: dict[str, Any]) -> dict[str, Any
             "skip_reason": "old",
         }
 
+    if EVENT_PROMO_TITLE_RE.search(title):
+        return {
+            "groundedness_score": groundedness_score,
+            "freshness_score": freshness_score,
+            "operator_value_score": max(0, operator_value_score - 1),
+            "decision": "skip",
+            "rationale": "Bài mang tính promo/event marketing, không phù hợp cho main brief.",
+            "skip_reason": "promo",
+        }
+
     if source_kind == "community" and COMMUNITY_SPECULATION_TITLE_RE.search(title):
         return {
             "groundedness_score": max(1, groundedness_score - 1),

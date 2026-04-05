@@ -21,10 +21,7 @@ import requests
 logger = logging.getLogger(__name__)
 
 VALID_LANES = {
-    "Research",
     "Product",
-    "Business",
-    "Policy & Ethics",
     "Society & Culture",
     "Practical",
 }
@@ -70,6 +67,7 @@ Nguyên tắc:
 - Chỉ dùng lane_override khi lane hiện tại rõ ràng sai.
 - Nếu có nhiều bài rất mạnh trong cùng một type, vẫn có thể giữ hơn 3 bài trong brief.
 - Ưu tiên bài official/strong-source khi chúng đủ mới và có tác động vận hành rõ.
+- Lane chỉ gồm 3 nhóm: Product, Society & Culture, Practical.
 
 Trả về JSON hợp lệ đúng schema. Không thêm markdown hay giải thích ngoài JSON."""
 
@@ -88,13 +86,19 @@ GROK_NEWS_COPY_SYSTEM = """Bạn là News Copy Editor cho AI Daily Digest.
 Nhiệm vụ duy nhất: viết lại mỗi bài thành một đoạn bản tin ngắn bằng tiếng Việt để gửi Telegram.
 
 Nguyên tắc:
-- Giọng văn trung tính, chuyên nghiệp, kiểu dây tin (wire): chỉ sự kiện, bối cảnh đã nêu trong nguồn.
+- Viết như một nhà báo tech đang kể chuyện cho đồng nghiệp thông minh nghe: tự nhiên, có nhịp, không khô như press release.
+- Mỗi blurb nên có 3-4 câu ngắn, đủ để tạo context chứ không chỉ chép lại headline.
+- Mở đoạn bằng điểm nhấn đáng chú ý nhất, không cần lặp y nguyên headline hay mở bằng “Hôm nay có”.
+- Ưu tiên động từ sống: "vừa ra", "đang mở", "bắt đầu thu phí", "đẩy", "siết", "thả", "đưa lên".
+- Khi hợp ngữ cảnh, có thể dùng chuyển đoạn nhẹ như "Trong khi đó", "Điều thú vị là", "Cũng đáng chú ý là".
+- Nói rõ vì sao tin này đáng chú ý với founder/operator/team AI, nhưng chỉ dựa trên dữ kiện đã có trong payload.
+- Nếu bài thuộc cùng một làn sóng lớn hơn như open-source, pricing, enterprise rollout, agent tooling, hãy đặt nó vào đúng context đó.
 - Không thêm hàm ý “doanh nghiệp/độc giả nên làm gì”, không cảnh báo, không đánh giá tác động chiến lược giả định.
 - Không viết khuyến nghị kiểu "nên theo dõi", "nên thử", "cần thận trọng", "cảnh báo", "doanh nghiệp cần", "chỉ nên", "tín hiệu yếu", "Điều này có ý nghĩa với".
 - Không chấm độ tin cậy nguồn, không bình luận "nguồn yếu/nguồn mạnh", trừ khi chính sự kiện xoay quanh tranh cãi về nguồn.
 - Không bịa chi tiết ngoài metadata đã cho.
 - Không lặp nguyên tiêu đề.
-- Không đụng lane GitHub/Facebook/main; chỉ viết lại câu chữ.
+- Không đụng lane main; chỉ viết lại câu chữ theo giọng newsletter kiểu The Neuron / Morning Brew Tech.
 
 Trả về JSON hợp lệ đúng schema. Không thêm markdown hay giải thích ngoài JSON."""
 
@@ -186,10 +190,7 @@ GROK_DELIVERY_SCHEMA: dict[str, Any] = {
                         "type": "string",
                         "enum": [
                             "keep",
-                            "Research",
                             "Product",
-                            "Business",
-                            "Policy & Ethics",
                             "Society & Culture",
                             "Practical",
                         ],
@@ -1005,9 +1006,10 @@ def rewrite_news_blurbs(
         system_prompt=GROK_NEWS_COPY_SYSTEM,
         user_prompt=_user_prompt(
             (
-                "Viết lại mỗi bài thành một đoạn bản tin ngắn, trung tính, chuyên nghiệp cho Telegram. "
-                "Chỉ nêu diễn biến và thông tin đã có trong payload; không thêm khuyên bảo, cảnh báo doanh nghiệp, "
-                "hay ý nghĩa hành động cho độc giả; không chấm độ tin cậy."
+                "Viết lại mỗi bài thành một đoạn bản tin 3-4 câu cho Telegram, đọc như newsletter công nghệ chứ không như thông cáo báo chí. "
+                "Mở bằng ý thú vị nhất, thêm một lớp context ngắn để người đọc hiểu vì sao tin này đáng chú ý, "
+                "nhưng chỉ dùng dữ kiện đã có trong payload. Không viết kiểu spec list khô cứng, không khuyên bảo độc giả phải làm gì, "
+                "không chấm độ tin cậy nguồn, và không kết thúc cụt lủn chỉ bằng một câu mô tả headline."
             ),
             payload_articles,
             feedback_summary_text=feedback_summary_text,
@@ -1026,7 +1028,7 @@ def rewrite_news_blurbs(
             if str(item.get("article_id", "") or "").strip() != article_id:
                 continue
             resolved[article.get("url", article_id) or article_id] = {
-                "blurb": _compact_text(item.get("blurb", ""), 320),
+                "blurb": _compact_text(item.get("blurb", ""), 420),
             }
             break
     return resolved

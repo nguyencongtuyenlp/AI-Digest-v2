@@ -87,6 +87,7 @@ logger = logging.getLogger(__name__)
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 SAFE_DDGS_TEXT_BACKEND = os.getenv("DDGS_TEXT_BACKEND", "duckduckgo").strip().lower() or "duckduckgo"
 MAX_GITHUB_RATIO = 0.30
+MAX_GITHUB_ONLY_ARTICLES = 3
 REQUEST_HEADERS = {
     "User-Agent": "AvalookDigestBot/1.0 (+https://avalook.local)",
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
@@ -1312,11 +1313,13 @@ def _cap_github_article_ratio(raw_articles: list[dict[str, Any]]) -> list[dict[s
         return raw_articles
 
     if not non_github_articles:
+        retained_github = sorted(github_articles, key=_github_retention_sort_key, reverse=True)[:MAX_GITHUB_ONLY_ARTICLES]
         logger.info(
-            "🐙 GitHub ratio cap active: 0 non-GitHub articles, dropping %d GitHub-only articles.",
+            "🐙 GitHub ratio cap active: 0 non-GitHub articles, giữ %d/%d GitHub-only articles mạnh nhất.",
+            len(retained_github),
             len(github_articles),
         )
-        return []
+        return retained_github
 
     max_github = int(len(non_github_articles) * MAX_GITHUB_RATIO / (1 - MAX_GITHUB_RATIO))
     if len(github_articles) <= max_github:

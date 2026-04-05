@@ -4,6 +4,7 @@ import unittest
 from datetime import date, datetime, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from typing import Any
 from unittest.mock import patch
 
 from editorial_guardrails import (
@@ -14,10 +15,11 @@ from editorial_guardrails import (
     validate_telegram_messages,
     validate_telegram_summary,
 )
+from executive_intelligence import build_executive_intelligence_bundle
 from feedback_loop import _clean_feedback_text, _feedback_labels, build_feedback_context
 from github_agent_brief import _group_github_articles
 from pipeline_runner import build_initial_state, publish_from_preview_state, publish_notion_only_from_preview_state
-from run_health import assess_run_health
+from run_health import assess_run_health, collect_source_health
 from runtime_presets import apply_runtime_preset
 from mlx_runner import run_json_inference
 from artifact_retention import cleanup_runtime_artifacts
@@ -33,6 +35,7 @@ from nodes.classify_and_score import (
     _articles_same_event,
     _classify_inference_with_retry,
     _held_out_article_fallback,
+    _select_top_articles,
     _prefilter_primary_type,
     _infer_taxonomy_tags,
     _prepare_classify_candidates,
@@ -40,6 +43,7 @@ from nodes.classify_and_score import (
 from nodes.delivery_judge import _deterministic_delivery_assessment, delivery_judge_node
 from nodes.gather_news import (
     _build_facebook_auto_article,
+    _fetch_hacker_news,
     _resolve_facebook_source_registry,
     _score_facebook_source,
     gather_news_node,
@@ -61,6 +65,7 @@ from nodes.send_telegram import send_telegram_node
 from nodes.summarize_vn import summarize_vn_node
 from source_catalog import load_watchlist_seeds
 from temporal_snapshots import write_temporal_snapshot
+from weekly_memo import build_weekly_memo
 
 
 class EditorialGuardrailsTest(unittest.TestCase):
@@ -268,8 +273,6 @@ class EditorialGuardrailsTest(unittest.TestCase):
                 "low_score_articles": [],
                 "final_articles": [],
                 "telegram_candidates": [],
-                "github_topic_candidates": [],
-                "facebook_topic_candidates": [],
                 "notion_pages": [],
             },
             datetime(2026, 4, 2, tzinfo=timezone.utc),
@@ -361,13 +364,74 @@ class EditorialGuardrailsTest(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            seeds = load_watchlist_seeds(project_root)
+            with patch.dict(
+                "os.environ",
+                {
+                    "WATCHLIST_SEEDS_FILE": "",
+                    "WATCHLIST_URLS": "",
+                    "WATCHLIST_QUERIES": "",
+                    "GITHUB_WATCHLIST_REPOS": "",
+                    "GITHUB_WATCHLIST_ORGS": "",
+                    "GITHUB_SEARCH_QUERIES": "",
+                    "WATCHLIST_COMPANIES": "",
+                    "WATCHLIST_PRODUCTS": "",
+                    "WATCHLIST_TOOLS": "",
+                    "WATCHLIST_POLICIES": "",
+                    "WATCHLIST_TOPICS": "",
+                },
+                clear=False,
+            ):
+                seeds = load_watchlist_seeds(project_root)
 
         self.assertEqual(seeds["queries"], ["OpenAI agents enterprise"])
         self.assertEqual(seeds["github_repos"], ["openai/openai-agents-python"])
         self.assertEqual(seeds["github_orgs"], ["huggingface"])
         self.assertEqual(seeds["github_queries"], ["model context protocol"])
         self.assertEqual(seeds["urls"], ["https://openai.com/news"])
+
+    def test_load_watchlist_seeds_parses_strategic_buckets(self) -> None:
+        with TemporaryDirectory() as tmp_dir:
+            project_root = Path(tmp_dir)
+            config_dir = project_root / "config"
+            config_dir.mkdir(parents=True, exist_ok=True)
+            watchlist_file = config_dir / "watchlist_seeds.txt"
+            watchlist_file.write_text(
+                "\n".join(
+                    [
+                        "company:OpenAI",
+                        "product:GPT-4.1",
+                        "tool:LangGraph",
+                        "policy:EU AI Act",
+                        "topic:Claude Code",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            with patch.dict(
+                "os.environ",
+                {
+                    "WATCHLIST_SEEDS_FILE": "",
+                    "WATCHLIST_URLS": "",
+                    "WATCHLIST_QUERIES": "",
+                    "GITHUB_WATCHLIST_REPOS": "",
+                    "GITHUB_WATCHLIST_ORGS": "",
+                    "GITHUB_SEARCH_QUERIES": "",
+                    "WATCHLIST_COMPANIES": "",
+                    "WATCHLIST_PRODUCTS": "",
+                    "WATCHLIST_TOOLS": "",
+                    "WATCHLIST_POLICIES": "",
+                    "WATCHLIST_TOPICS": "",
+                },
+                clear=False,
+            ):
+                seeds = load_watchlist_seeds(project_root)
+
+        self.assertEqual(seeds["company_watchlist"], ["OpenAI"])
+        self.assertEqual(seeds["product_watchlist"], ["GPT-4.1"])
+        self.assertEqual(seeds["tool_watchlist"], ["LangGraph"])
+        self.assertEqual(seeds["policy_watchlist"], ["EU AI Act"])
+        self.assertEqual(seeds["topic_watchlist"], ["Claude Code"])
 
     @patch("nodes.gather_news._fetch_github_articles")
     @patch("nodes.gather_news.load_watchlist_seeds")
@@ -458,13 +522,15 @@ class EditorialGuardrailsTest(unittest.TestCase):
 
         self.assertEqual(len(result["raw_articles"]), 1)
         self.assertEqual(result["raw_articles"][0]["social_platform"], "facebook")
-        self.assertEqual(result["raw_articles"][0]["delivery_lane_hint"], "facebook_topic")
+        self.assertEqual(result["raw_articles"][0]["delivery_lane_hint"], "")
 
     @patch("nodes.gather_news._load_facebook_auto_targets")
     @patch("nodes.gather_news._scrape_facebook_target_payloads")
     @patch("nodes.gather_news.load_watchlist_seeds")
+    @patch("nodes.gather_news._facebook_session_needs_refresh", return_value=False)
     def test_gather_news_accepts_facebook_auto_articles_for_topic_lane(
         self,
+        _mock_session_fresh,
         mock_watchlist,
         mock_scrape,
         mock_targets,
@@ -637,7 +703,6 @@ class EditorialGuardrailsTest(unittest.TestCase):
         self.assertEqual(len(registry["candidate_sources"]), 1)
         self.assertEqual(registry["candidate_sources"][0]["label"], "Việt Nguyễn AI")
 
-    @patch("nodes.delivery_judge.grok_facebook_score_enabled", return_value=False)
     @patch("nodes.delivery_judge.grok_delivery_enabled", return_value=False)
     @patch("nodes.delivery_judge.run_json_inference")
     def test_delivery_judge_routes_github_articles_to_github_topic(self, mock_judge, *_mocks) -> None:
@@ -689,12 +754,10 @@ class EditorialGuardrailsTest(unittest.TestCase):
             }
         )
 
-        self.assertEqual(len(result["telegram_candidates"]), 1)
+        self.assertEqual(len(result["telegram_candidates"]), 2)
         self.assertEqual(result["telegram_candidates"][0]["source_domain"], "techcrunch.com")
-        self.assertEqual(len(result["github_topic_candidates"]), 1)
-        self.assertEqual(result["github_topic_candidates"][0]["github_full_name"], "openai/openai-agents-python")
+        self.assertTrue(any(item.get("github_full_name") == "openai/openai-agents-python" for item in result["telegram_candidates"]))
 
-    @patch("nodes.delivery_judge.grok_facebook_score_enabled", return_value=False)
     @patch("nodes.delivery_judge.grok_delivery_enabled", return_value=False)
     @patch("nodes.delivery_judge.run_json_inference")
     def test_delivery_judge_routes_x_discovered_github_repo_to_github_topic(self, mock_judge, *_mocks) -> None:
@@ -747,16 +810,14 @@ class EditorialGuardrailsTest(unittest.TestCase):
             }
         )
 
-        self.assertEqual(len(result["telegram_candidates"]), 1)
+        self.assertEqual(len(result["telegram_candidates"]), 2)
         self.assertEqual(result["telegram_candidates"][0]["source_domain"], "techcrunch.com")
-        self.assertEqual(len(result["github_topic_candidates"]), 1)
-        self.assertEqual(result["github_topic_candidates"][0]["source_domain"], "github.com")
-        self.assertEqual(result["github_topic_candidates"][0]["source"], "Grok X Scout: builder-posts | @OpenAIDevs")
+        self.assertTrue(any(item.get("source_domain") == "github.com" for item in result["telegram_candidates"]))
+        self.assertTrue(any(item.get("source") == "Grok X Scout: builder-posts | @OpenAIDevs" for item in result["telegram_candidates"]))
 
-    @patch("nodes.delivery_judge.grok_facebook_score_enabled", return_value=False)
     @patch("nodes.delivery_judge.grok_delivery_enabled", return_value=False)
     @patch("nodes.delivery_judge.run_json_inference")
-    def test_delivery_judge_routes_facebook_articles_to_facebook_topic(self, mock_judge, *_mocks) -> None:
+    def test_delivery_judge_treats_facebook_articles_as_main_candidates_when_strong_enough(self, mock_judge, *_mocks) -> None:
         mock_judge.return_value = {
             "groundedness_score": 4,
             "freshness_score": 4,
@@ -787,16 +848,17 @@ class EditorialGuardrailsTest(unittest.TestCase):
                         "social_signal": True,
                         "social_platform": "facebook",
                         "community_reactions": "Nhiều comment xác nhận workflow hữu ích.",
+                        "project_fit": "High",
                     },
                 ]
             }
         )
 
-        self.assertEqual(result["telegram_candidates"], [])
-        self.assertEqual(len(result["facebook_topic_candidates"]), 1)
-        self.assertEqual(result["facebook_topic_candidates"][0]["source_domain"], "facebook.com")
+        self.assertEqual(len(result["telegram_candidates"]), 1)
+        self.assertEqual(result["telegram_candidates"][0]["source_domain"], "facebook.com")
+        self.assertNotIn("facebook_topic_candidates", result)
 
-    @patch("nodes.delivery_judge.grok_facebook_score_enabled", return_value=False)
+    @patch("nodes.delivery_judge.grok_final_editor_enabled", return_value=False)
     @patch("nodes.delivery_judge.grok_delivery_enabled", return_value=False)
     @patch("nodes.delivery_judge.run_json_inference")
     def test_delivery_judge_skips_facebook_promo_post(self, mock_judge, *_mocks) -> None:
@@ -835,12 +897,14 @@ class EditorialGuardrailsTest(unittest.TestCase):
             }
         )
 
-        self.assertEqual(result["facebook_topic_candidates"], [])
-        self.assertEqual(result["final_articles"][0]["facebook_topic_skip_reason"], "promo")
+        self.assertNotIn("facebook_topic_candidates", result)
+        self.assertEqual(result["telegram_candidates"], [])
+        self.assertEqual(result["final_articles"][0]["delivery_skip_reason"], "promo")
 
-    @patch("nodes.delivery_judge.grok_facebook_score_enabled", return_value=False)
+    @patch("nodes.delivery_judge.grok_final_editor_enabled", return_value=False)
+    @patch("nodes.delivery_judge.grok_delivery_enabled", return_value=False)
     @patch("nodes.delivery_judge.run_json_inference")
-    def test_delivery_judge_includes_fresh_facebook_benchmark_post(self, mock_judge, _mock_grok_flag) -> None:
+    def test_delivery_judge_includes_fresh_facebook_benchmark_post(self, mock_judge, *_mocks) -> None:
         mock_judge.return_value = {}
 
         result = delivery_judge_node(
@@ -875,15 +939,16 @@ class EditorialGuardrailsTest(unittest.TestCase):
                         "facebook_authority_score": 76,
                         "facebook_sort_mode": "newest",
                         "post_age_hours": 14,
+                        "project_fit": "High",
                     },
                 ]
             }
         )
 
-        self.assertEqual(len(result["facebook_topic_candidates"]), 1)
-        self.assertEqual(result["facebook_topic_candidates"][0]["delivery_decision"], "include")
+        self.assertEqual(len(result["telegram_candidates"]), 1)
+        self.assertEqual(result["telegram_candidates"][0]["delivery_decision"], "include")
+        self.assertNotIn("facebook_topic_candidates", result)
 
-    @patch("nodes.delivery_judge.grok_facebook_score_enabled", return_value=False)
     @patch("nodes.delivery_judge.grok_delivery_enabled", return_value=False)
     @patch("nodes.delivery_judge.run_json_inference")
     def test_delivery_judge_diversifies_main_candidates_by_type(self, mock_judge, *_mocks) -> None:
@@ -950,7 +1015,7 @@ class EditorialGuardrailsTest(unittest.TestCase):
         )
 
         candidate_types = [article["primary_type"] for article in result["telegram_candidates"]]
-        self.assertEqual(candidate_types[:2], ["Product", "Business"])
+        self.assertEqual(candidate_types[:2], ["Product", "Product"])
 
     @patch("nodes.delivery_judge.grok_delivery_max_articles", return_value=3)
     @patch("nodes.delivery_judge.rerank_delivery_articles")
@@ -1030,7 +1095,7 @@ class EditorialGuardrailsTest(unittest.TestCase):
 
         self.assertEqual(len(result["telegram_candidates"]), 1)
         self.assertEqual(result["telegram_candidates"][0]["url"], "https://example.com/b")
-        self.assertEqual(result["telegram_candidates"][0]["primary_type"], "Business")
+        self.assertEqual(result["telegram_candidates"][0]["primary_type"], "Product")
         self.assertEqual(result["telegram_candidates"][0]["grok_priority_score"], 91)
         self.assertEqual(result["final_articles"][0]["delivery_decision"], "skip")
 
@@ -1058,7 +1123,7 @@ class EditorialGuardrailsTest(unittest.TestCase):
             "https://example.com/security-incident": {
                 "decision": "include",
                 "priority_score": 88,
-                "lane_override": "Product",
+                "lane_override": "Practical",
                 "rationale": "Bài đáng theo dõi, nhưng lane override này nên bị chặn.",
             },
         }
@@ -1073,7 +1138,7 @@ class EditorialGuardrailsTest(unittest.TestCase):
                         "source": "RSS: TechCrunch",
                         "source_domain": "techcrunch.com",
                         "primary_type": "Business",
-                        "tags": ["safety", "open_source"],
+                        "tags": ["safety"],
                         "total_score": 78,
                         "content_available": True,
                         "source_verified": True,
@@ -1089,10 +1154,10 @@ class EditorialGuardrailsTest(unittest.TestCase):
         )
 
         self.assertEqual(len(result["telegram_candidates"]), 1)
-        self.assertEqual(result["telegram_candidates"][0]["primary_type"], "Business")
+        self.assertEqual(result["telegram_candidates"][0]["primary_type"], "Product")
         self.assertEqual(
             result["telegram_candidates"][0]["grok_primary_type_override_rejected"],
-            "Product",
+            "Practical",
         )
 
     @patch("nodes.delivery_judge.grok_final_editor_max_articles", return_value=3)
@@ -1174,7 +1239,7 @@ class EditorialGuardrailsTest(unittest.TestCase):
         self.assertEqual(candidate_by_url["https://example.com/a"]["grok_final_rank_score"], 72)
 
     @patch("nodes.summarize_vn.get_history", return_value=[])
-    def test_summarize_vn_publish_keeps_six_topics_when_main_candidates_exist(self, _mock_history) -> None:
+    def test_summarize_vn_publish_hides_empty_lanes_when_main_candidates_exist(self, _mock_history) -> None:
         result = summarize_vn_node(
             {
                 "run_mode": "publish",
@@ -1193,14 +1258,13 @@ class EditorialGuardrailsTest(unittest.TestCase):
                         "delivery_decision": "include",
                     }
                 ],
-                "github_topic_candidates": [],
                 "notion_pages": [],
             }
         )
 
-        self.assertEqual(len(result["telegram_messages"]), 6)
+        self.assertEqual(len(result["telegram_messages"]), 1)
         self.assertTrue(any("🚀 Product" in msg for msg in result["telegram_messages"]))
-        self.assertTrue(any("Chưa có tin nổi bật cho nhóm này" in msg for msg in result["telegram_messages"]))
+        self.assertFalse(any("Lane này hôm nay hơi yên" in msg for msg in result["telegram_messages"]))
 
     @patch("nodes.summarize_vn.rewrite_news_blurbs")
     @patch("nodes.summarize_vn.grok_news_copy_enabled", return_value=True)
@@ -1237,8 +1301,6 @@ class EditorialGuardrailsTest(unittest.TestCase):
                         "delivery_decision": "include",
                     }
                 ],
-                "github_topic_candidates": [],
-                "facebook_topic_candidates": [],
                 "notion_pages": [],
             }
         )
@@ -1378,10 +1440,10 @@ class EditorialGuardrailsTest(unittest.TestCase):
 
         digest = build_safe_digest(articles, notion_pages, today=date(2026, 3, 26))
 
-        self.assertIn("AI Daily Brief | 26/03", digest)
+        self.assertIn("| 26/03", digest)
         self.assertIn('<a href="https://notion.so/example">Đọc thêm</a>', digest)
         self.assertNotIn("[Đọc thêm](", digest)
-        self.assertIn("🚀 Product | AI Daily Brief | 26/03", digest)
+        self.assertIn("🚀 Product | 26/03", digest)
         self.assertNotIn("Sáng nay có", digest)
         self.assertNotIn("Điểm 72/100", digest)
         self.assertNotIn("Độ chắc", digest)
@@ -1399,7 +1461,7 @@ class EditorialGuardrailsTest(unittest.TestCase):
 
         messages = build_safe_digest_messages([], [], history_articles=history_articles, today=date(2026, 3, 26))
 
-        self.assertEqual(len(messages), 6)
+        self.assertEqual(len(messages), 3)
         product_message = next(message for message in messages if "🚀 Product" in message)
         self.assertIn("Gemini adds workspace import", product_message)
         self.assertIn("(26/03/2026)", product_message)
@@ -1413,7 +1475,7 @@ class EditorialGuardrailsTest(unittest.TestCase):
             {
                 "title": "AI overly affirms users asking for personal advice",
                 "url": "https://reddit.com/r/artificial/a",
-                "primary_type": "Research",
+                "primary_type": "Product",
                 "summary": "Ý chính của tin này là: x",
                 "source": "RSS: Example",
                 "relevance_score": 80,
@@ -1422,7 +1484,7 @@ class EditorialGuardrailsTest(unittest.TestCase):
             {
                 "title": "AI overly affirms users asking for personal advice",
                 "url": "https://reddit.com/r/OpenAI/b",
-                "primary_type": "Research",
+                "primary_type": "Product",
                 "summary": "Ý chính của tin này là: y",
                 "source": "RSS: Example",
                 "relevance_score": 79,
@@ -1432,17 +1494,17 @@ class EditorialGuardrailsTest(unittest.TestCase):
 
         messages = build_safe_digest_messages([], [], history_articles=history_articles, today=date(2026, 3, 26))
 
-        research_message = next(message for message in messages if "🔬 Research" in message)
-        title_occurrences = research_message.lower().count("ai overly affirms users asking for personal advice")
+        product_message = next(message for message in messages if "🚀 Product" in message)
+        title_occurrences = product_message.lower().count("ai overly affirms users asking for personal advice")
         self.assertEqual(title_occurrences, 1)
 
     def test_build_safe_digest_messages_dedup_same_story_different_headlines(self) -> None:
-        # Cùng sự kiện, hai URL/title khác nhau (headline ngắn vs dài) — chỉ giữ một bullet Business.
+        # Cùng sự kiện, hai URL/title khác nhau (headline ngắn vs dài) — chỉ giữ một bullet Product.
         articles = [
             {
                 "title": "OpenAI acquires TBPN",
                 "url": "https://openai.com/index/openai-acquires-tbpn",
-                "primary_type": "Business",
+                "primary_type": "Product",
                 "note_summary_vi": "OpenAI mua TBPN để mở rộng đối thoại AI.",
                 "source": "RSS: OpenAI",
                 "source_domain": "openai.com",
@@ -1455,7 +1517,7 @@ class EditorialGuardrailsTest(unittest.TestCase):
             {
                 "title": "OpenAI acquires TBPN, the buzzy founder-led business talk show",
                 "url": "https://example.com/tbpn-long-headline",
-                "primary_type": "Business",
+                "primary_type": "Product",
                 "note_summary_vi": "Bản dài hơn về deal TBPN và show trên YouTube.",
                 "source": "RSS: Example",
                 "source_domain": "example.com",
@@ -1473,9 +1535,9 @@ class EditorialGuardrailsTest(unittest.TestCase):
             per_type=3,
             allow_archive_replay=False,
         )
-        business_message = next(message for message in messages if "💼 Business" in message)
-        self.assertIn("OpenAI acquires TBPN", business_message)
-        self.assertNotIn("founder-led", business_message.lower())
+        product_message = next(message for message in messages if "🚀 Product" in message)
+        self.assertIn("OpenAI acquires TBPN", product_message)
+        self.assertNotIn("founder-led", product_message.lower())
 
     def test_articles_same_event_matches_short_headline_inside_long(self) -> None:
         short_a = {"title": "OpenAI acquires TBPN"}
@@ -1514,10 +1576,10 @@ class EditorialGuardrailsTest(unittest.TestCase):
     def test_build_safe_digest_messages_prefers_grok_final_editor_order_within_section(self) -> None:
         articles = [
             {
-                "title": "Product item 1",
+                "title": "Anthropic adds admin controls",
                 "url": "https://example.com/p1",
                 "primary_type": "Product",
-                "note_summary_vi": "Tin product 1 cho founder.",
+                "note_summary_vi": "Anthropic thêm admin controls cho enterprise.",
                 "source": "RSS: Example",
                 "source_domain": "example.com",
                 "total_score": 88,
@@ -1527,10 +1589,10 @@ class EditorialGuardrailsTest(unittest.TestCase):
                 "grok_final_rank_score": 72,
             },
             {
-                "title": "Product item 2",
+                "title": "OpenAI ships agent memory tools",
                 "url": "https://example.com/p2",
                 "primary_type": "Product",
-                "note_summary_vi": "Tin product 2 cho founder.",
+                "note_summary_vi": "OpenAI phát hành agent memory tools cho developer.",
                 "source": "RSS: Example",
                 "source_domain": "example.com",
                 "total_score": 81,
@@ -1549,7 +1611,7 @@ class EditorialGuardrailsTest(unittest.TestCase):
         )
 
         product_message = next(message for message in messages if "🚀 Product" in message)
-        self.assertLess(product_message.find("Product item 2"), product_message.find("Product item 1"))
+        self.assertLess(product_message.find("OpenAI ships agent memory tools"), product_message.find("Anthropic adds admin controls"))
 
     def test_build_safe_digest_messages_prefers_telegram_blurb_over_note_summary(self) -> None:
         messages = build_safe_digest_messages(
@@ -1614,7 +1676,7 @@ class EditorialGuardrailsTest(unittest.TestCase):
         }]
         notion_pages = [{"title": "Strong source article", "url": "https://notion.so/good"}]
         summary = (
-            "<b>AI Daily Brief | 26/03</b>\n\n"
+            "<b>🚀 Product | 26/03</b>\n\n"
             "[Đọc thêm](https://bad.example)\n\n"
             '<a href="https://bad.example">Đọc thêm</a>'
         )
@@ -1664,8 +1726,8 @@ class EditorialGuardrailsTest(unittest.TestCase):
             "source_tier": "a",
         }]
         summary = (
-            "<b>💼 Business | AI Daily Brief | 26/03</b>\n\n"
-            "1. <b>Strong source article</b>\n"
+            "<b>🚀 Product | 26/03</b>\n\n"
+            "<b>Strong source article</b>\n"
             "Đây là tin quan trọng cho team.\n"
             '<a href="https://example.com/strong-source?ref=mail&amp;day=1">Đọc thêm</a>'
         )
@@ -1679,13 +1741,40 @@ class EditorialGuardrailsTest(unittest.TestCase):
 
         self.assertNotIn("unknown_links_present", warnings)
 
-    def test_prefilter_primary_type_treats_security_incident_as_policy(self) -> None:
+    def test_build_weekly_memo_summarizes_history_into_exec_view(self) -> None:
+        memo = build_weekly_memo(
+            [
+                {
+                    "title": "OpenAI ships enterprise admin controls",
+                    "source": "RSS: OpenAI",
+                    "primary_type": "Product",
+                    "summary": "OpenAI thêm admin controls mới cho doanh nghiệp.",
+                    "relevance_score": 88,
+                },
+                {
+                    "title": "Claude Code workflow grows with MCP memory",
+                    "source": "Reddit r/ChatGPT",
+                    "primary_type": "Practical",
+                    "summary": "Community chia sẻ workflow mới với Claude Code và MCP.",
+                    "relevance_score": 79,
+                },
+            ],
+            days=7,
+            today=date(2026, 4, 5),
+        )
+
+        self.assertIn("Weekly AI Memo (30/03 - 05/04/2026)", memo)
+        self.assertIn("## Top Signals", memo)
+        self.assertIn("[Product] OpenAI ships enterprise admin controls", memo)
+        self.assertIn("## Suggested Actions", memo)
+
+    def test_prefilter_primary_type_routes_security_incident_to_society_lane(self) -> None:
         primary_type, primary_emoji = _prefilter_primary_type(
             "Mercor says it was hit by cyberattack tied to compromise of open-source LiteLLM project"
         )
 
-        self.assertEqual(primary_type, "Policy")
-        self.assertEqual(primary_emoji, "⚖️")
+        self.assertEqual(primary_type, "Society & Culture")
+        self.assertEqual(primary_emoji, "🌍")
 
     def test_build_run_report_markdown_contains_source_breakdown(self) -> None:
         state = {
@@ -1712,7 +1801,6 @@ class EditorialGuardrailsTest(unittest.TestCase):
             "top_articles": [{"title": "Top article", "primary_type": "Product", "total_score": 81, "freshness_status": "fresh_boost"}],
             "final_articles": [],
             "telegram_candidates": [{"title": "Telegram article", "primary_type": "Product", "total_score": 81, "delivery_score": 13, "source_domain": "techcrunch.com"}],
-            "github_topic_candidates": [{"title": "openai/codex", "primary_type": "Product", "total_score": 88, "delivery_score": 14, "github_full_name": "openai/codex"}],
             "notion_pages": [{"title": "Telegram article", "url": "https://notion.so/example"}],
             "summary_mode": "deterministic_sections",
             "summary_warnings": [],
@@ -1729,12 +1817,10 @@ class EditorialGuardrailsTest(unittest.TestCase):
         self.assertIn("Telegram article", markdown)
         self.assertIn("## Scored By Tag", markdown)
         self.assertIn("product_update", markdown)
-        self.assertIn("## GitHub Topic Candidates", markdown)
         self.assertIn("## Run Health", markdown)
         self.assertIn("## Temporal Snapshots", markdown)
         self.assertIn("20260402_084400_gather.json", markdown)
         self.assertIn("Publish ready", markdown)
-        self.assertIn("openai/codex", markdown)
         self.assertIn("- Run mode: preview", markdown)
 
     def test_build_run_report_markdown_includes_score_breakdown_and_skip_reasons(self) -> None:
@@ -1774,7 +1860,6 @@ class EditorialGuardrailsTest(unittest.TestCase):
             ],
             "final_articles": [],
             "telegram_candidates": [{"title": "Strong article", "primary_type": "Product", "total_score": 71, "delivery_score": 13, "delivery_rationale": "Đủ mạnh để đưa vào brief."}],
-            "github_topic_candidates": [],
             "notion_pages": [],
         }
 
@@ -1795,8 +1880,6 @@ class EditorialGuardrailsTest(unittest.TestCase):
             "low_score_articles": [],
             "final_articles": [],
             "telegram_candidates": [],
-            "github_topic_candidates": [],
-            "facebook_topic_candidates": [],
             "notion_pages": [],
             "grok_source_gap_batch_note": "Thiếu tín hiệu official từ các vendor model lớn.",
             "grok_source_gap_suggestions": [
@@ -1843,47 +1926,12 @@ class EditorialGuardrailsTest(unittest.TestCase):
                 }
             ],
             "telegram_candidates": [],
-            "github_topic_candidates": [],
-            "facebook_topic_candidates": [],
-            "facebook_discovered_sources": [
-                {
-                    "label": "Nghiện AI",
-                    "url": "https://www.facebook.com/groups/ungdungaicongviec/",
-                    "source_type": "group",
-                    "discovery_origin": "joined",
-                    "ai_source_score": 82,
-                    "status": "auto_active",
-                }
-            ],
-            "facebook_auto_active_sources": [
-                {
-                    "label": "Nghiện AI",
-                    "url": "https://www.facebook.com/groups/ungdungaicongviec/",
-                    "source_type": "group",
-                    "discovery_origin": "joined",
-                    "ai_source_score": 82,
-                    "status": "auto_active",
-                }
-            ],
-            "facebook_candidate_sources": [
-                {
-                    "label": "Việt Nguyễn AI",
-                    "url": "https://www.facebook.com/vietnguyenai/",
-                    "source_type": "profile",
-                    "discovery_origin": "followed",
-                    "ai_source_score": 61,
-                    "status": "candidate",
-                }
-            ],
             "notion_pages": [],
         }
 
         markdown = _build_run_report_markdown(state, datetime(2026, 4, 2, tzinfo=timezone.utc))
 
-        self.assertIn("## Facebook Discovery", markdown)
-        self.assertIn("Facebook Sort Mode Breakdown", markdown)
         self.assertIn("Facebook Skip Reasons", markdown)
-        self.assertIn("Việt Nguyễn AI", markdown)
         self.assertIn("promo", markdown)
 
     def test_assess_run_health_flags_safe_fallback_batch(self) -> None:
@@ -1892,7 +1940,6 @@ class EditorialGuardrailsTest(unittest.TestCase):
                 "raw_articles": [{"title": "x"}],
                 "scored_articles": [{"title": "x", "source_domain": "github.com", "source_tier": "c"}],
                 "telegram_candidates": [],
-                "github_topic_candidates": [],
                 "summary_mode": "safe_fallback",
                 "summary_warnings": ["msg1:unknown_links_present"],
             }
@@ -2051,7 +2098,7 @@ class EditorialGuardrailsTest(unittest.TestCase):
         self.assertTrue(config["enable_grok_prefilter"])
         self.assertTrue(config["enable_grok_final_editor"])
         self.assertTrue(config["enable_grok_news_copy"])
-        self.assertTrue(config["enable_grok_facebook_score"])
+        self.assertFalse(config["enable_grok_facebook_score"])
         self.assertTrue(config["enable_grok_source_gap"])
         self.assertTrue(config["enable_grok_scout"])
         self.assertTrue(config["enable_grok_x_scout"])
@@ -2083,6 +2130,162 @@ class EditorialGuardrailsTest(unittest.TestCase):
         self.assertEqual(normalized[1]["source_kind"], "community")
         self.assertGreaterEqual(normalized[0]["source_priority"], 90)
         self.assertGreaterEqual(normalized[1]["community_signal_strength"], 3)
+
+    @patch("nodes.gather_news.requests.get")
+    def test_fetch_hacker_news_uses_algolia_api_and_maps_hits(self, mock_get) -> None:
+        class _Response:
+            status_code = 200
+
+            def raise_for_status(self) -> None:
+                return None
+
+            def json(self) -> dict[str, Any]:
+                return {
+                    "hits": [
+                        {
+                            "objectID": "12345",
+                            "title": "OpenAI ships new agent workflow tools",
+                            "url": "https://openai.com/index/new-agent-workflow-tools/",
+                            "points": 180,
+                            "num_comments": 41,
+                            "created_at": "2026-04-04T02:00:00Z",
+                        },
+                        {
+                            "objectID": "67890",
+                            "title": "Weekend math puzzle",
+                            "url": "https://example.com/puzzle",
+                            "points": 99,
+                            "num_comments": 12,
+                            "created_at": "2026-04-04T03:00:00Z",
+                        },
+                    ]
+                }
+
+        mock_get.return_value = _Response()
+
+        articles = _fetch_hacker_news(limit=5)
+
+        self.assertEqual(len(articles), 1)
+        self.assertEqual(mock_get.call_args.args[0], "https://hn.algolia.com/api/v1/search")
+        self.assertEqual(mock_get.call_args.kwargs["params"]["tags"], "story")
+        self.assertEqual(mock_get.call_args.kwargs["params"]["hitsPerPage"], 30)
+        article = articles[0]
+        self.assertEqual(article["source"], "Hacker News Algolia")
+        self.assertEqual(article["url"], "https://openai.com/index/new-agent-workflow-tools/")
+        self.assertEqual(article["community_hint"], "https://news.ycombinator.com/item?id=12345")
+        self.assertEqual(article["hn_points"], 180)
+        self.assertEqual(article["hn_num_comments"], 41)
+        self.assertGreaterEqual(article["community_signal_strength"], 4)
+
+    @patch("run_health.requests.head")
+    def test_collect_source_health_marks_dead_and_stale_sources(self, mock_head) -> None:
+        class _Response:
+            def __init__(self, status_code: int) -> None:
+                self.status_code = status_code
+
+        def _fake_head(url: str, **_kwargs: Any) -> _Response:
+            return _Response(503 if "dead" in url else 200)
+
+        mock_head.side_effect = _fake_head
+
+        with TemporaryDirectory() as tmpdir:
+            session_path = Path(tmpdir) / "digest_session.session"
+            session_path.write_text("session", encoding="utf-8")
+            old_session = datetime.now().timestamp() - (31 * 86400)
+            os.utime(session_path, (old_session, old_session))
+
+            facebook_path = Path(tmpdir) / "facebook_storage_state.json"
+            facebook_path.write_text("{}", encoding="utf-8")
+            old_facebook = datetime.now().timestamp() - (8 * 86400)
+            os.utime(facebook_path, (old_facebook, old_facebook))
+
+            with patch("run_health.CURATED_RSS_FEEDS", ["https://ok.example/rss", "https://dead.example/rss"]):
+                with patch.dict(
+                    "os.environ",
+                    {
+                        "TELEGRAM_CHANNELS": "aivietnam",
+                        "TELETHON_API_ID": "12345",
+                        "TELETHON_API_HASH": "hash",
+                        "TELETHON_SESSION_NAME": str(session_path),
+                        "ENABLE_FACEBOOK_AUTO": "1",
+                        "FACEBOOK_STORAGE_STATE_FILE": str(facebook_path),
+                    },
+                    clear=False,
+                ):
+                    health = collect_source_health()
+
+        self.assertEqual(health["https://ok.example/rss"], "ok")
+        self.assertEqual(health["https://dead.example/rss"], "dead")
+        self.assertEqual(health["telethon_session"], "stale")
+        self.assertEqual(health["facebook_storage_state"], "stale")
+
+    @patch("nodes.gather_news.requests.get")
+    def test_fetch_reddit_posts_filters_to_hot_recent_high_score_threads(self, mock_get) -> None:
+        now_ts = datetime.now(timezone.utc).timestamp()
+
+        class _Response:
+            def raise_for_status(self) -> None:
+                return None
+
+            def json(self) -> dict[str, Any]:
+                return {
+                    "data": {
+                        "children": [
+                            {
+                                "data": {
+                                    "title": "Claude Code workflow for AI teams",
+                                    "selftext": "Detailed workflow using Claude Code and MCP.",
+                                    "permalink": "/r/ChatGPT/comments/abc123/workflow/",
+                                    "url": "https://www.reddit.com/r/ChatGPT/comments/abc123/workflow/",
+                                    "created_utc": now_ts - 3600,
+                                    "score": 180,
+                                    "num_comments": 55,
+                                }
+                            },
+                            {
+                                "data": {
+                                    "title": "Old AI thread",
+                                    "selftext": "Still interesting",
+                                    "permalink": "/r/ChatGPT/comments/old/old/",
+                                    "url": "https://www.reddit.com/r/ChatGPT/comments/old/old/",
+                                    "created_utc": now_ts - 90000,
+                                    "score": 500,
+                                    "num_comments": 90,
+                                }
+                            },
+                            {
+                                "data": {
+                                    "title": "Low score AI thread",
+                                    "selftext": "Not enough traction",
+                                    "permalink": "/r/ChatGPT/comments/low/low/",
+                                    "url": "https://www.reddit.com/r/ChatGPT/comments/low/low/",
+                                    "created_utc": now_ts - 1800,
+                                    "score": 45,
+                                    "num_comments": 4,
+                                }
+                            },
+                        ]
+                    }
+                }
+
+        mock_get.return_value = _Response()
+
+        with patch.dict(
+            "os.environ",
+            {
+                "REDDIT_CLIENT_ID": "",
+                "REDDIT_CLIENT_SECRET": "",
+                "REDDIT_SUBREDDITS": "ChatGPT",
+            },
+            clear=False,
+        ):
+            from nodes.gather_news import _fetch_reddit_posts
+
+            articles = _fetch_reddit_posts(limit_per_subreddit=2)
+
+        self.assertEqual(len(articles), 1)
+        self.assertEqual(articles[0]["source"], "Reddit r/ChatGPT")
+        self.assertGreaterEqual(articles[0]["reddit_score"], 180)
 
     @patch("nodes.gather_news._fetch_github_articles")
     @patch("nodes.gather_news.load_watchlist_seeds")
@@ -2126,6 +2329,66 @@ class EditorialGuardrailsTest(unittest.TestCase):
         kwargs = mock_fetch_github.call_args.kwargs
         self.assertEqual(kwargs["repo_watchlist"], ["repo-a/a", "repo-b/b"])
         self.assertEqual(kwargs["org_watchlist"], ["org-a"])
+
+    @patch("nodes.gather_news.requests.post")
+    @patch("nodes.gather_news._build_facebook_auto_articles")
+    @patch("nodes.gather_news._resolve_facebook_source_registry")
+    @patch("nodes.gather_news.load_watchlist_seeds", return_value={"urls": [], "queries": [], "github_repos": [], "github_orgs": [], "github_queries": []})
+    def test_gather_news_skips_facebook_auto_and_alerts_when_session_is_stale(
+        self,
+        _mock_watchlist,
+        mock_resolve_registry,
+        mock_build_facebook,
+        mock_post,
+    ) -> None:
+        class _Response:
+            status_code = 200
+
+        mock_post.return_value = _Response()
+
+        with TemporaryDirectory() as tmpdir:
+            facebook_path = Path(tmpdir) / "facebook_storage_state.json"
+            facebook_path.write_text("{}", encoding="utf-8")
+            old_timestamp = datetime.now().timestamp() - (8 * 86400)
+            os.utime(facebook_path, (old_timestamp, old_timestamp))
+
+            with patch.dict(
+                "os.environ",
+                {
+                    "FACEBOOK_STORAGE_STATE_FILE": str(facebook_path),
+                    "TELEGRAM_BOT_TOKEN": "token",
+                    "TELEGRAM_CHAT_ID": "-100123",
+                    "TELEGRAM_THREAD_ID": "111",
+                },
+                clear=False,
+            ):
+                result = gather_news_node(
+                    {
+                        "run_mode": "publish",
+                        "runtime_config": {
+                            "enable_rss": False,
+                            "enable_github": False,
+                            "enable_social_signals": False,
+                            "enable_watchlist": False,
+                            "enable_hn": False,
+                            "enable_reddit": False,
+                            "enable_ddg": False,
+                            "enable_telegram_channels": False,
+                            "enable_facebook_auto": True,
+                            "enable_grok_scout": False,
+                            "enable_grok_x_scout": False,
+                        }
+                    }
+                )
+
+        mock_resolve_registry.assert_not_called()
+        mock_build_facebook.assert_not_called()
+        mock_post.assert_called_once()
+        self.assertEqual(
+            mock_post.call_args.kwargs["json"]["text"],
+            "⚠️ Facebook session cũ hơn 7 ngày. Cần chạy facebook_login_setup.py",
+        )
+        self.assertNotIn("facebook_auto_active_sources", result)
 
     @patch("nodes.gather_news._extract_full_text", return_value="OpenAI ships stronger enterprise admin and agent controls.")
     @patch.dict("os.environ", {"XAI_API_KEY": "test-xai-key"}, clear=False)
@@ -2248,6 +2511,7 @@ class EditorialGuardrailsTest(unittest.TestCase):
                     "enable_telegram_channels": False,
                     "enable_facebook_auto": False,
                     "enable_grok_scout": True,
+                    "enable_grok_x_scout": False,
                     "grok_scout_min_non_github_articles": 10,
                 }
             }
@@ -2407,19 +2671,16 @@ class EditorialGuardrailsTest(unittest.TestCase):
         )
 
         self.assertFalse(result["telegram_sent"])
-        self.assertFalse(result["github_topic_sent"])
-        self.assertFalse(result["facebook_topic_sent"])
+        self.assertNotIn("facebook_topic_sent", result)
 
     @patch("nodes.send_telegram._send_message", return_value=True)
-    def test_send_telegram_routes_main_github_and_facebook_topics_separately(self, mock_send) -> None:
+    def test_send_telegram_sends_main_topic_only(self, mock_send) -> None:
         with patch.dict(
             "os.environ",
             {
                 "TELEGRAM_BOT_TOKEN": "token",
                 "TELEGRAM_CHAT_ID": "-100123",
                 "TELEGRAM_THREAD_ID": "111",
-                "TELEGRAM_GITHUB_THREAD_ID": "279",
-                "TELEGRAM_FACEBOOK_THREAD_ID": "380",
             },
             clear=False,
         ):
@@ -2427,18 +2688,13 @@ class EditorialGuardrailsTest(unittest.TestCase):
                 {
                     "publish_telegram": True,
                     "telegram_messages": ["<b>Main</b>"],
-                    "github_topic_messages": ["<b>GitHub</b>"],
-                    "facebook_topic_messages": ["<b>Facebook</b>"],
                 }
             )
 
         self.assertTrue(result["telegram_sent"])
-        self.assertTrue(result["github_topic_sent"])
-        self.assertTrue(result["facebook_topic_sent"])
-        self.assertEqual(mock_send.call_count, 3)
+        self.assertNotIn("facebook_topic_sent", result)
+        self.assertEqual(mock_send.call_count, 1)
         self.assertEqual(mock_send.call_args_list[0].args[3], 111)
-        self.assertEqual(mock_send.call_args_list[1].args[3], 279)
-        self.assertEqual(mock_send.call_args_list[2].args[3], 380)
 
     def test_save_notion_preview_mode_returns_no_fake_notion_pages(self) -> None:
         result = save_notion_node(
@@ -2498,14 +2754,76 @@ class EditorialGuardrailsTest(unittest.TestCase):
         self.assertEqual(context["feedback_label_counts"]["stale"], 1)
         self.assertEqual(context["feedback_label_counts"]["good_pick"], 1)
 
+    @patch("feedback_loop.get_recent_feedback")
+    def test_build_feedback_context_derives_preference_profile(self, mock_recent_feedback) -> None:
+        mock_recent_feedback.return_value = [
+            {
+                "text": "@avalookbot ưu tiên founder",
+                "user_name": "team",
+                "labels_json": json.dumps(["founder_lens", "want_more_depth"]),
+                "created_at": "2026-04-05T01:00:00+00:00",
+            },
+            {
+                "text": "@avalookbot nguồn yếu",
+                "user_name": "team",
+                "labels_json": json.dumps(["weak_source", "weak_source", "expected_type:product"]),
+                "created_at": "2026-04-05T02:00:00+00:00",
+            },
+            {
+                "text": "@avalookbot nên lên brief",
+                "user_name": "team",
+                "labels_json": json.dumps(["promote_delivery"]),
+                "created_at": "2026-04-05T03:00:00+00:00",
+            },
+        ]
+
+        context = build_feedback_context(days=14, limit=20)
+
+        profile = context["feedback_preference_profile"]
+        self.assertTrue(profile["strict_source_review"])
+        self.assertTrue(profile["prefer_founder_angle"])
+        self.assertTrue(profile["prefer_depth"])
+        self.assertEqual(profile["delivery_bias"], "promote")
+        self.assertIn("product", profile["preferred_types"])
+
+    def test_build_executive_intelligence_bundle_writes_watchlist_and_topic_artifacts(self) -> None:
+        history = [
+            {
+                "title": "OpenAI ships new agent controls",
+                "url": "https://example.com/openai-agent-controls",
+                "source": "RSS: OpenAI",
+                "source_domain": "openai.com",
+                "primary_type": "Product",
+                "summary": "OpenAI cập nhật thêm agent controls cho enterprise.",
+                "relevance_score": 88,
+                "created_at": "2026-04-05T01:00:00+00:00",
+            },
+            {
+                "title": "Claude Code memory workflow spreads in teams",
+                "url": "https://example.com/claude-code-memory",
+                "source": "Reddit r/ChatGPT",
+                "source_domain": "reddit.com",
+                "primary_type": "Practical",
+                "summary": "Workflow Claude Code + memory đang được nhiều team thử.",
+                "relevance_score": 79,
+                "created_at": "2026-04-05T02:00:00+00:00",
+            },
+        ]
+
+        bundle = build_executive_intelligence_bundle(history, days=14)
+
+        self.assertTrue(str(bundle["watchlist_path"]).endswith(".md"))
+        self.assertIn("Watchlist Intelligence", bundle["watchlist_markdown"])
+        self.assertIsInstance(bundle["topic_page_artifacts"], list)
+
     def test_quality_gate_falls_back_to_safe_digest(self) -> None:
         state = {
             "final_articles": [{
                 "title": "Strong source article",
                 "note_summary_vi": "Ý chính của tin này là: đây là tin quan trọng cho team.",
                 "total_score": 65,
-                "primary_type": "Business",
-                "primary_emoji": "💼",
+                "primary_type": "Product",
+                "primary_emoji": "🚀",
                 "source": "RSS: Reuters",
                 "source_domain": "reuters.com",
                 "published_at": "2026-03-26T03:00:00+00:00",
@@ -2520,8 +2838,8 @@ class EditorialGuardrailsTest(unittest.TestCase):
         result = quality_gate_node(state)
 
         self.assertEqual(result["summary_mode"], "safe_fallback")
-        self.assertIn("AI Daily Brief |", result["summary_vn"])
-        self.assertEqual(len(result["telegram_messages"]), 6)
+        self.assertIn("🚀 Product |", result["summary_vn"])
+        self.assertEqual(len(result["telegram_messages"]), 3)
         self.assertTrue(result["summary_warnings"])
 
     @patch("nodes.quality_gate.get_history", return_value=[])
@@ -2529,9 +2847,8 @@ class EditorialGuardrailsTest(unittest.TestCase):
         state = {
             "run_mode": "preview",
             "telegram_candidates": [],
-            "github_topic_messages": [],
-            "telegram_messages": ["<b>🔬 Research | AI Daily Brief | 01/04</b>\n\nChưa có tin nổi bật cho nhóm này ở lượt chạy hiện tại."],
-            "summary_vn": "<b>🔬 Research | AI Daily Brief | 01/04</b>\n\nChưa có tin nổi bật cho nhóm này ở lượt chạy hiện tại.",
+            "telegram_messages": ["<b>🌍 Society & Culture | 01/04</b>\n\nLane này hôm nay hơi yên, chưa có bài nào đủ chắc để đưa lên brief chính."],
+            "summary_vn": "<b>🌍 Society & Culture | 01/04</b>\n\nLane này hôm nay hơi yên, chưa có bài nào đủ chắc để đưa lên brief chính.",
             "notion_pages": [],
             "summary_mode": "deterministic_sections",
         }
@@ -2580,7 +2897,7 @@ class EditorialGuardrailsTest(unittest.TestCase):
                 },
                 "low",
             ),
-            "Business",
+            "Product",
         )
 
     def test_storage_tags_drop_low_confidence_weak_source_noise(self) -> None:
@@ -3009,6 +3326,19 @@ class EditorialGuardrailsTest(unittest.TestCase):
         self.assertGreater(article["total_score"], 36)
         self.assertEqual(article["analysis_tier"], "basic")
 
+    def test_select_top_articles_uses_dynamic_percentile_with_minimum_floor(self) -> None:
+        articles = [
+            {"title": "A", "total_score": 52, "analysis_tier": "basic"},
+            {"title": "B", "total_score": 48, "analysis_tier": "basic"},
+            {"title": "C", "total_score": 44, "analysis_tier": "basic"},
+            {"title": "D", "total_score": 29, "analysis_tier": "skip"},
+        ]
+
+        top_articles, score_cutoff = _select_top_articles(articles, min_items=3, max_items=15)
+
+        self.assertEqual(score_cutoff, 44)
+        self.assertEqual([article["title"] for article in top_articles], ["A", "B", "C"])
+
     def test_delivery_judge_skips_duplicate_event_article(self) -> None:
         article = {
             "title": "Duplicate article",
@@ -3160,18 +3490,45 @@ class EditorialGuardrailsTest(unittest.TestCase):
         state = {
             "run_mode": "publish",
             "telegram_candidates": [],
-            "github_topic_candidates": [],
-            "facebook_topic_candidates": [],
             "notion_pages": [],
         }
 
         result = summarize_vn_node(state)
 
-        self.assertEqual(len(result["telegram_messages"]), 6)
-        product_message = next(message for message in result["telegram_messages"] if "🚀 Product" in message)
+        self.assertEqual(len(result["telegram_messages"]), 1)
+        product_message = result["telegram_messages"][0]
         self.assertIn("OpenAI launches new production controls", product_message)
         self.assertIn("(31/03/2026)", product_message)
         self.assertNotEqual(result["summary_mode"], "no_candidates")
+
+    @patch("nodes.summarize_vn.get_history", return_value=[])
+    def test_summarize_vn_keeps_all_quality_passed_articles_without_hard_cap(self, _mock_get_history) -> None:
+        labels = ["admin controls", "agent memory", "workspace rollout", "voice mode", "MCP tooling"]
+        candidates = [
+            {
+                "title": f"Product {labels[idx - 1]}",
+                "url": f"https://example.com/product-{idx}",
+                "primary_type": "Product",
+                "note_summary_vi": f"OpenAI vừa đẩy tiếp {labels[idx - 1]} vào workflow doanh nghiệp.",
+                "source": "RSS: Example",
+                "source_domain": "example.com",
+                "total_score": 85 - idx,
+                "delivery_decision": "include",
+            }
+            for idx in range(1, 6)
+        ]
+
+        result = summarize_vn_node(
+            {
+                "run_mode": "publish",
+                "telegram_candidates": candidates,
+                "notion_pages": [],
+            }
+        )
+
+        product_message = next(message for message in result["telegram_messages"] if "🚀 Product" in message)
+        for label in labels:
+            self.assertIn(f"Product {label}", product_message)
 
     def test_quality_gate_keeps_no_candidates_empty_for_publish(self) -> None:
         result = quality_gate_node(
@@ -3193,7 +3550,7 @@ class EditorialGuardrailsTest(unittest.TestCase):
     def test_delivery_judge_skips_unknown_weak_source(self) -> None:
         article = {
             "title": "Weak source article",
-            "total_score": 59,
+            "total_score": 39,
             "source_tier": "c",
             "confidence_label": "medium",
             "content_available": True,
@@ -3225,6 +3582,35 @@ class EditorialGuardrailsTest(unittest.TestCase):
 
         self.assertEqual(result["decision"], "skip")
 
+    @patch("nodes.delivery_judge.grok_final_editor_enabled", return_value=False)
+    @patch("nodes.delivery_judge.grok_delivery_enabled", return_value=False)
+    @patch("nodes.delivery_judge.run_json_inference", return_value=None)
+    def test_delivery_judge_keeps_all_include_candidates_without_hard_cap(self, _mock_run_json, *_mocks) -> None:
+        final_articles = [
+            {
+                "title": f"Main article {idx}",
+                "url": f"https://example.com/main-{idx}",
+                "primary_type": "Product",
+                "note_summary_vi": f"OpenAI vừa mở thêm capability số {idx}.",
+                "total_score": 80,
+                "source": "RSS: Example",
+                "source_domain": "example.com",
+                "source_tier": "a",
+                "content_available": True,
+                "source_verified": True,
+                "freshness_unknown": False,
+                "is_stale_candidate": False,
+                "event_is_primary": True,
+                "event_cluster_size": 1,
+                "confidence_label": "high",
+            }
+            for idx in range(1, 15)
+        ]
+
+        result = delivery_judge_node({"final_articles": final_articles, "runtime_config": {}})
+
+        self.assertEqual(len(result["telegram_candidates"]), 14)
+
     @patch("mlx_runner.run_inference", return_value="""```json
 {'primary_type': 'Product', 'c1_score': 12, 'tags': ['ai',], 'analysis_tier': 'basic'}
 ```""")
@@ -3246,13 +3632,10 @@ summary_vi: Sự cố này tác động trực tiếp tới stack AI của nhi�
 tags: [regulation, safety]
 """,
     )
-    def test_run_json_inference_can_rescue_line_based_structured_output(self, _mock_run_inference) -> None:
+    def test_run_json_inference_rejects_line_based_non_json_output(self, _mock_run_inference) -> None:
         parsed = run_json_inference("system", "user")
 
-        self.assertIsInstance(parsed, dict)
-        self.assertEqual(parsed["primary_type"], "Policy")
-        self.assertEqual(parsed["analysis_tier"], "deep")
-        self.assertEqual(parsed["tags"], ["regulation", "safety"])
+        self.assertIsNone(parsed)
 
 
 if __name__ == "__main__":
