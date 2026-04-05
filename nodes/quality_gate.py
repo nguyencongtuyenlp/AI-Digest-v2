@@ -75,7 +75,7 @@ def quality_gate_node(state: dict[str, Any]) -> dict[str, Any]:
             history_articles=history_articles,
             per_type=per_type_limit,
             allow_archive_replay=True,
-            include_empty_sections=True,
+            include_empty_sections=False,
             allow_high_priority_overflow=True,
         )
         safe_summary = build_safe_digest(
@@ -84,7 +84,7 @@ def quality_gate_node(state: dict[str, Any]) -> dict[str, Any]:
             history_articles=history_articles,
             max_articles=per_type_limit,
             allow_archive_replay=True,
-            include_empty_sections=True,
+            include_empty_sections=False,
             allow_high_priority_overflow=True,
         )
         logger.warning("⚠️ Quality gate fallback activated: %s", ", ".join(warnings) or "empty_summary")

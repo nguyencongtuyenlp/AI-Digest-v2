@@ -128,10 +128,10 @@ def summarize_vn_node(state: dict[str, Any]) -> dict[str, Any]:
             if str(article.get("primary_type", "") or "").strip()
         }
     )
-    include_empty_sections = True
+    include_empty_sections = False
     if is_publish_run and briefing_articles and type_coverage < 3:
         logger.info(
-            "🧭 Publish run chỉ có %d/3 lane có main candidates; sẽ giữ đủ 3 lane và đánh dấu nhóm chưa có tin nổi bật.",
+            "🧭 Publish run hiện chỉ có %d lane có candidate; sẽ chỉ render các lane có bài thật.",
             type_coverage,
         )
 
@@ -150,7 +150,7 @@ def summarize_vn_node(state: dict[str, Any]) -> dict[str, Any]:
             notion_pages,
             history_articles=history_articles,
             allow_archive_replay=True,
-            include_empty_sections=True,
+            include_empty_sections=False,
             allow_high_priority_overflow=True,
         )
         logger.info("✅ Không dựng được sections, dùng safe digest deterministic.")
