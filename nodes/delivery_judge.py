@@ -174,6 +174,13 @@ def _project_fit_bucket(article: dict[str, Any]) -> str:
     return "low"
 
 
+def _main_brief_threshold(article: dict[str, Any]) -> tuple[int, set[str]]:
+    primary_type = canonical_type_name(article.get("primary_type"))
+    if primary_type == "Practical":
+        return 40, {"high"}
+    return 45, {"high", "medium"}
+
+
 def _deterministic_delivery_assessment(article: dict[str, Any]) -> dict[str, Any]:
     score = int(article.get("total_score", 0) or 0)
     source_tier = str(article.get("source_tier", "unknown")).lower()
@@ -264,7 +271,8 @@ def _deterministic_delivery_assessment(article: dict[str, Any]) -> dict[str, Any
     if isinstance(age_hours, (int, float)) and age_hours <= 72:
         freshness_score = min(5, freshness_score + 1)
 
-    if score >= 55 or (score >= 45 and project_fit in {"high", "medium"}):
+    min_score, fit_whitelist = _main_brief_threshold(article)
+    if score >= 55 or (score >= min_score and project_fit in fit_whitelist):
         decision = "include"
     elif score < 40:
         decision = "skip"
