@@ -152,6 +152,7 @@ EVENT_PROMO_TITLE_RE = re.compile(
     re.IGNORECASE,
 )
 FACEBOOK_OLD_HINT_RE = re.compile(r"^\d+\s*(tháng|năm|month|months|year|years)\b", re.IGNORECASE)
+MAX_MAIN_BRIEF_AGE_HOURS = 24 * 7
 
 
 def _runtime_int(runtime_config: dict[str, Any], runtime_key: str, env_key: str, default: int) -> int:
@@ -174,10 +175,7 @@ def _project_fit_bucket(article: dict[str, Any]) -> str:
     return "low"
 
 
-def _main_brief_threshold(article: dict[str, Any]) -> tuple[int, set[str]]:
-    primary_type = canonical_type_name(article.get("primary_type"))
-    if primary_type == "Practical":
-        return 40, {"high"}
+def _main_brief_threshold(_article: dict[str, Any]) -> tuple[int, set[str]]:
     return 45, {"high", "medium"}
 
 
@@ -237,7 +235,7 @@ def _deterministic_delivery_assessment(article: dict[str, Any]) -> dict[str, Any
         is_stale_candidate
         or is_old_news
         or freshness_bucket in {"aging", "stale"}
-        or (isinstance(age_hours, (int, float)) and age_hours > 120)
+        or (isinstance(age_hours, (int, float)) and age_hours > MAX_MAIN_BRIEF_AGE_HOURS)
     ):
         return {
             "groundedness_score": groundedness_score,
@@ -491,6 +489,10 @@ def _merge_judge_result(article: dict[str, Any], base: dict[str, Any], judged: d
         skip_reason = str(judged.get("skip_reason", "")).strip().lower()
         if skip_reason:
             result["skip_reason"] = skip_reason
+
+    if base.get("decision") == "include":
+        result["decision"] = "include"
+        result["skip_reason"] = ""
 
     article["groundedness_score"] = max(0, min(5, int(result["groundedness_score"])))
     article["freshness_score"] = max(0, min(5, int(result["freshness_score"])))
@@ -797,6 +799,11 @@ def delivery_judge_node(state: dict[str, Any]) -> dict[str, Any]:
         runtime_config=runtime_config,
         feedback_summary_text=str(state.get("feedback_summary_text", "") or ""),
     )
+    for article in reviewed_articles:
+        if article.get("delivery_decision") != "include" and article.get("delivery_score_breakdown", {}).get("base_decision") == "include":
+            article["delivery_decision"] = "include"
+            article["delivery_skip_reason"] = ""
+
     main_include_articles = [
         article for article in reviewed_articles
         if article.get("delivery_decision") == "include"
@@ -813,6 +820,24 @@ def delivery_judge_node(state: dict[str, Any]) -> dict[str, Any]:
         runtime_config=runtime_config,
         feedback_summary_text=str(state.get("feedback_summary_text", "") or ""),
     )
+
+    selected_keys = {
+        str(article.get("url", "") or article.get("title", "") or id(article))
+        for article in telegram_candidates
+    }
+    for article in reviewed_articles:
+        title = str(article.get("title", "") or "N/A")
+        score = int(article.get("total_score", 0) or 0)
+        fit = _project_fit_bucket(article)
+        article_key = str(article.get("url", "") or article.get("title", "") or id(article))
+        if article_key in selected_keys:
+            logger.info("PASS %s | score=%d | fit=%s", title[:40], score, fit)
+            continue
+        reason = str(article.get("delivery_skip_reason", "") or "").strip().lower()
+        if not reason:
+            decision = str(article.get("delivery_decision", "") or "").strip().lower()
+            reason = "review_threshold" if decision == "review" else _infer_skip_reason_from_article(article) or "filtered_out"
+        logger.info("SKIP %s | score=%d | fit=%s | reason=%s", title[:40], score, fit, reason or "-")
 
     logger.info(
         "✅ Delivery judge xong: main=%d include | total=%d",
