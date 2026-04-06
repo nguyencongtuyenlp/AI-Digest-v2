@@ -14,6 +14,7 @@ import re
 import sys
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -72,6 +73,20 @@ LANE_TEXT_HINTS: dict[str, tuple[str, ...]] = {
     ),
     "Practical": ("tutorial", "guide", "workflow", "how to", "playbook", "best practice", "tooling"),
 }
+
+VERGE_NON_AI_KEYWORDS = [
+    "gaming glasses",
+    "ar glasses",
+    "music review",
+    "album review",
+    "film",
+    "movie",
+    "tv show",
+    "headphones",
+    "speaker",
+    "camera",
+    "gaming",
+]
 
 DELIVERY_JUDGE_SYSTEM = """Bạn là Delivery Judge cho một sản phẩm AI Daily Digest.
 Nhiệm vụ: quyết định bài nào xứng đáng xuất hiện trong bản brief Telegram buổi sáng.
@@ -165,6 +180,26 @@ def _runtime_int(runtime_config: dict[str, Any], runtime_key: str, env_key: str,
         return default
 
 
+def _article_source_domain(article: dict[str, Any]) -> str:
+    source_domain = str(article.get("source_domain", "") or article.get("source", "") or "").strip().lower()
+    if "://" in source_domain:
+        source_domain = urlparse(source_domain).netloc.lower()
+    if not source_domain:
+        url = str(article.get("url", "") or "").strip()
+        if url:
+            source_domain = urlparse(url).netloc.lower()
+    if source_domain.startswith("www."):
+        source_domain = source_domain[4:]
+    return source_domain
+
+
+def _fails_verge_non_ai_keyword_filter(article: dict[str, Any]) -> bool:
+    if _article_source_domain(article) != "theverge.com":
+        return False
+    title_lower = str(article.get("title", "") or "").lower()
+    return any(keyword in title_lower for keyword in VERGE_NON_AI_KEYWORDS)
+
+
 def _project_fit_bucket(article: dict[str, Any]) -> str:
     explicit = str(article.get("project_fit", "") or "").strip().lower()
     if explicit in {"high", "medium", "low"}:
@@ -207,7 +242,7 @@ def _deterministic_delivery_assessment(article: dict[str, Any]) -> dict[str, Any
     if source_kind == "github" and score >= 50:
         operator_value_score = max(operator_value_score, 3)
 
-    if not is_ai_relevant:
+    if not is_ai_relevant or _fails_verge_non_ai_keyword_filter(article):
         return {
             "groundedness_score": groundedness_score,
             "freshness_score": freshness_score,
@@ -399,7 +434,7 @@ def _facebook_topic_delivery_assessment(
     rationale = "Đủ tốt để vào topic Facebook News."
     decision = "include"
 
-    if not is_ai_relevant:
+    if not is_ai_relevant or _fails_verge_non_ai_keyword_filter(article):
         skip_reason = "not_ai"
         decision = "skip"
         operator_value_score = 0
