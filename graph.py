@@ -122,6 +122,7 @@ def _route_after_score(state: DigestState) -> str:
     Returns:
         'deep_analysis' nếu có bài top, 'compose_note_summary' nếu không có
     """
+    # `top_articles` được node scoring chuẩn bị sẵn, router chỉ cần nhìn cờ này để rẽ nhánh.
     top = state.get("top_articles", [])
     if top:
         return "deep_analysis"
@@ -140,7 +141,7 @@ def build_graph() -> StateGraph:
     """
     graph = StateGraph(DigestState)
 
-    # ── Đăng ký tất cả nodes ────────────────────────────────────────
+    # Khai báo tên node -> hàm xử lý để LangGraph biết mỗi bước sẽ gọi logic nào.
     graph.add_node("gather", gather_news_node)
     graph.add_node("normalize_source", normalize_source_node)
     graph.add_node("deduplicate", deduplicate_node)
@@ -156,14 +157,14 @@ def build_graph() -> StateGraph:
     graph.add_node("send_telegram", send_telegram_node)
     graph.add_node("generate_run_report", generate_run_report_node)
 
-    # ── Edges cố định ───────────────────────────────────────────────
+    # Đây là "xương sống" của pipeline, luôn chạy theo cùng một thứ tự.
     graph.set_entry_point("gather")
     graph.add_edge("gather", "normalize_source")
     graph.add_edge("normalize_source", "deduplicate")
     graph.add_edge("deduplicate", "collect_feedback")
     graph.add_edge("collect_feedback", "classify_and_score")
 
-    # ── Conditional edge: chỉ deep analysis nếu có bài top ─────────
+    # Chỉ những bài nổi bật mới đi qua nhánh phân tích sâu để tiết kiệm thời gian/model cost.
     graph.add_conditional_edges(
         "classify_and_score",
         _route_after_score,
@@ -173,11 +174,11 @@ def build_graph() -> StateGraph:
         },
     )
 
-    # ── Tiếp tục flow sau deep analysis ─────────────────────────────
+    # Nếu đã phân tích sâu xong thì bổ sung idea rồi nhập lại nhánh tổng hợp chung.
     graph.add_edge("deep_analysis", "recommend_idea")
     graph.add_edge("recommend_idea", "compose_note_summary")
 
-    # ── Output: lưu → tổng hợp → gửi ──────────────────────────────
+    # Mọi bài cuối cùng đều đi qua chuỗi publish/report giống nhau để đầu ra thống nhất.
     graph.add_edge("compose_note_summary", "delivery_judge")
     graph.add_edge("delivery_judge", "save_notion")
     graph.add_edge("save_notion", "summarize_vn")
@@ -186,4 +187,5 @@ def build_graph() -> StateGraph:
     graph.add_edge("send_telegram", "generate_run_report")
     graph.add_edge("generate_run_report", END)
 
+    # `compile()` biến sơ đồ khai báo ở trên thành app có thể `invoke(initial_state)`.
     return graph.compile()

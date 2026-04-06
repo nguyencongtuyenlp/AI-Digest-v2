@@ -73,6 +73,7 @@ class _RunLogHandler(logging.Handler):
 
 APP_STATE: dict[str, Any] = {
     "lock": threading.Lock(),
+    # `running` + `job_id` giúp UI biết trạng thái hiện tại và tránh bấm chạy trùng.
     "running": False,
     "job_id": 0,
     "started_at": 0.0,
@@ -91,6 +92,7 @@ def _read_report_content(report_path: str) -> str:
     if not report_path:
         return ""
     try:
+        # UI chỉ đọc text báo cáo đã tạo sẵn, không xử lý thêm nội dung bên trong.
         return Path(report_path).read_text(encoding="utf-8")
     except Exception:
         return ""
@@ -161,12 +163,15 @@ def _delivery_status(article: dict[str, Any]) -> str:
 def _build_workspace_articles(state: dict[str, Any] | None) -> list[dict[str, Any]]:
     current_state = dict(state or {})
     notion_pages = list(current_state.get("notion_pages", []) or [])
+
+    # Map URL bài viết -> URL Notion để UI gắn link review đúng từng article.
     notion_lookup = {
         str(page.get("source_url", "") or ""): str(page.get("url", "") or "")
         for page in notion_pages
         if isinstance(page, dict)
     }
 
+    # Ưu tiên bài đã qua nhiều bước xử lý nhất; nếu chưa có thì fallback về tập trước đó.
     articles = (
         list(current_state.get("final_articles", []) or [])
         or list(current_state.get("scored_articles", []) or [])
@@ -179,6 +184,7 @@ def _build_workspace_articles(state: dict[str, Any] | None) -> list[dict[str, An
         if not isinstance(article, dict):
             continue
 
+        # UI chỉ giữ một bản tóm tắt gọn để render nhanh, không đẩy toàn bộ article thô ra frontend.
         score = int(article.get("total_score", 0) or 0)
         title = _clean_preview_text(article.get("title", "Untitled"), 120)
         if not title:
@@ -238,6 +244,8 @@ def _status_payload() -> dict[str, Any]:
         started_at = float(APP_STATE.get("started_at", 0.0) or 0.0)
         result = dict(APP_STATE.get("last_result", {}) or {})
         preview_available = APP_STATE.get("preview_state") is not None
+
+        # Payload này là "ảnh chụp" trạng thái hiện tại để frontend poll và tự cập nhật.
         payload = {
             "running": running,
             "job_id": int(APP_STATE.get("job_id", 0) or 0),
@@ -267,6 +275,7 @@ def _normalize_runtime_config(raw: dict[str, Any] | None) -> dict[str, Any]:
     if not merged:
         return {}
 
+    # Chuẩn hóa input số từ form/UI để pipeline không phải tự parse lại.
     int_defaults = {
         "min_deep_analysis_score": 60,
         "max_classify_articles": 8,
@@ -288,6 +297,7 @@ def _normalize_runtime_config(raw: dict[str, Any] | None) -> dict[str, Any]:
         except (TypeError, ValueError):
             merged[key] = default
 
+    # Checkbox hoặc JSON từ UI có thể đi lên dưới dạng string, nên cần ép về bool thật.
     bool_defaults = {
         "enable_rss": True,
         "enable_github": True,
@@ -313,6 +323,7 @@ def _normalize_runtime_config(raw: dict[str, Any] | None) -> dict[str, Any]:
 
 def _run_in_background(mode: str, runtime_config: dict[str, Any], run_profile: str) -> None:
     try:
+        # Worker thread này xử lý run thật để HTTP server không bị block request/status polling.
         result, summary = run_pipeline(run_mode=mode, runtime_config=runtime_config, run_profile=run_profile)
         summary["summary_text"] = str(result.get("summary_vn", "") or "")
         summary["telegram_messages"] = list(result.get("telegram_messages", []) or [])
@@ -339,6 +350,7 @@ def _approve_preview_in_background() -> None:
         if not preview_state:
             raise RuntimeError("Chưa có preview nào để approve.")
 
+        # Approve sẽ publish từ chính batch preview đã xem, không chạy lại pipeline từ đầu.
         result, summary = publish_from_preview_state(preview_state)
         summary["summary_text"] = str(result.get("summary_vn", "") or "")
         summary["telegram_messages"] = list(result.get("telegram_messages", []) or [])
@@ -363,6 +375,7 @@ def _publish_notion_only_in_background() -> None:
         if not preview_state:
             raise RuntimeError("Chưa có preview nào để publish Notion.")
 
+        # Nhánh này phục vụ review nội bộ: lưu Notion trước, giữ lại preview để sau đó approve Telegram tiếp.
         result, summary = publish_notion_only_from_preview_state(preview_state)
         summary["summary_text"] = str(result.get("summary_vn", "") or "")
         summary["telegram_messages"] = list(result.get("telegram_messages", []) or [])
@@ -393,6 +406,7 @@ def start_job(mode: str, runtime_config: dict[str, Any] | None = None, run_profi
         if APP_STATE.get("running"):
             return False, "Đang có một run khác chưa xong."
 
+        # Reset trạng thái job cũ trước khi spin up thread mới để UI không hiển thị dữ liệu lẫn nhau.
         APP_STATE["running"] = True
         APP_STATE["job_id"] = int(APP_STATE.get("job_id", 0) or 0) + 1
         APP_STATE["started_at"] = time.time()
@@ -418,6 +432,7 @@ def approve_preview_job() -> tuple[bool, str]:
         if APP_STATE.get("preview_state") is None:
             return False, "Chưa có preview nào để approve."
 
+        # Approve được xem như một job mới để UI/log có lifecycle riêng.
         APP_STATE["running"] = True
         APP_STATE["job_id"] = int(APP_STATE.get("job_id", 0) or 0) + 1
         APP_STATE["started_at"] = time.time()
@@ -442,6 +457,7 @@ def publish_notion_only_job() -> tuple[bool, str]:
         if str((preview_state or {}).get("preview_publish_state", "") or "") == "notion_only_published":
             return False, "Batch preview này đã được đẩy lên Notion rồi."
 
+        # Giữ nguyên pattern start job để frontend chỉ cần xử lý một kiểu trạng thái bất kể action nào.
         APP_STATE["running"] = True
         APP_STATE["job_id"] = int(APP_STATE.get("job_id", 0) or 0) + 1
         APP_STATE["started_at"] = time.time()

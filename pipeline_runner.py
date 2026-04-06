@@ -55,6 +55,7 @@ def _pipeline_run_lock():
 
 @contextlib.contextmanager
 def _runtime_model_override(runtime_config: dict[str, Any] | None = None):
+    # Cho phép một run tạm thời đổi model MLX mà không ảnh hưởng run kế tiếp.
     config = dict(runtime_config or {})
     set_runtime_mlx_model_path(str(config.get("runtime_mlx_model", "")).strip() or None)
     try:
@@ -68,11 +69,16 @@ def build_initial_state(
     runtime_config: dict[str, Any] | None = None,
     run_profile: str = "",
 ) -> dict[str, Any]:
+    # Chuẩn hóa mode để mọi nhánh phía sau chỉ cần xử lý 2 giá trị hợp lệ.
     normalized_mode = str(run_mode or "publish").strip().lower()
     if normalized_mode not in {"publish", "preview"}:
         normalized_mode = "publish"
+
+    # Profile có thể khác mode để bật preset riêng, ví dụ preview_notion_only.
     normalized_profile = str(run_profile or normalized_mode).strip().lower()
     merged_runtime = dict(runtime_config or {})
+
+    # Preset sẽ đổ thêm default runtime nhưng vẫn tôn trọng override được truyền vào.
     merged_runtime = apply_runtime_preset(normalized_profile, merged_runtime)
 
     is_publish = normalized_mode == "publish"
@@ -92,12 +98,14 @@ def build_initial_state(
 
 @lru_cache(maxsize=1)
 def _get_pipeline_graph():
+    # Compile graph một lần rồi tái sử dụng cho các run sau để giảm thời gian khởi động.
     from graph import build_graph
 
     return build_graph()
 
 
 def summarize_result(result: dict[str, Any], elapsed_seconds: float) -> dict[str, Any]:
+    # Chỉ giữ message Telegram thực sự có nội dung để UI/report không phải lọc lại.
     telegram_messages = [msg for msg in result.get("telegram_messages", []) if str(msg or "").strip()]
     published_notion_pages = [
         page for page in result.get("notion_pages", [])
@@ -141,6 +149,7 @@ def run_pipeline(
     runtime_config: dict[str, Any] | None = None,
     run_profile: str = "",
 ) -> tuple[dict[str, Any], dict[str, Any]]:
+    # Tạo state đầu vào duy nhất để mọi node đọc cùng một nguồn cấu hình.
     initial_state = build_initial_state(
         run_mode=run_mode,
         runtime_config=runtime_config,
@@ -150,6 +159,8 @@ def run_pipeline(
     with _runtime_model_override(initial_state.get("runtime_config", {})):
         with _pipeline_run_lock():
             start = datetime.now(timezone.utc)
+
+            # Chạy health check trước để biết nguồn nào đang hỏng ngay trong report của run này.
             source_health = collect_source_health()
             initial_state["source_health"] = source_health
             initial_state["source_health_alert_sent"] = notify_source_health_if_needed(
@@ -157,6 +168,8 @@ def run_pipeline(
                 run_mode=initial_state.get("run_mode", "publish"),
             )
             app = _get_pipeline_graph()
+
+            # `invoke` sẽ chạy xuyên suốt toàn bộ graph và trả về state cuối cùng.
             result = app.invoke(initial_state)
             elapsed = (datetime.now(timezone.utc) - start).total_seconds()
 
@@ -186,7 +199,7 @@ def _publish_selected_outputs_from_preview(
         from nodes.send_telegram import send_telegram_node
         from nodes.summarize_vn import summarize_vn_node
 
-        # Clone nông đủ dùng vì downstream chủ yếu update dict top-level / article fields.
+        # Clone nông để tái dùng đúng dữ liệu preview đã duyệt, nhưng vẫn tránh sửa trực tiếp state cũ.
         state = {
             key: (list(value) if isinstance(value, list) else dict(value) if isinstance(value, dict) else value)
             for key, value in dict(preview_state or {}).items()
@@ -206,12 +219,15 @@ def _publish_selected_outputs_from_preview(
         nodes = []
         if publish_notion:
             nodes.append(save_notion_node)
+
+        # Summary + quality gate luôn chạy lại để output cuối phản ánh đúng trạng thái publish hiện tại.
         nodes.extend([summarize_vn_node, quality_gate_node])
         if publish_telegram:
             nodes.append(send_telegram_node)
         nodes.append(generate_run_report_node)
 
         with _runtime_model_override(state.get("runtime_config", {})):
+            # Chạy tuần tự một đoạn pipeline ngắn thay vì regather toàn bộ từ đầu.
             for node in nodes:
                 state.update(node(state))
 

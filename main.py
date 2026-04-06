@@ -2,6 +2,7 @@
 """
 main.py — Entry point cho Daily Digest AI Agent (MVP2).
 
+Load môi trường
 Load environment, compile LangGraph, chạy pipeline, log kết quả.
 Model: Qwen2.5-72B-4bit trên Apple Silicon (MLX).
 """
@@ -48,6 +49,7 @@ _harden_http_logging()
 
 def main() -> None:
     """Chạy toàn bộ pipeline Daily Digest Agent."""
+    # Đọc profile để cùng một codebase có thể chạy publish/preview preset khác nhau.
     run_profile = str(os.getenv("DIGEST_RUN_PROFILE", "publish") or "publish").strip().lower()
     logger.info("=" * 60)
     logger.info("🚀 Daily Digest AI Agent (MVP2)")
@@ -55,11 +57,15 @@ def main() -> None:
     logger.info("   Mode : publish")
     logger.info("   Profile: %s", run_profile)
     logger.info("=" * 60)
+
+    # Import tại đây để phần bootstrap env/logging hoàn tất rồi mới kéo pipeline nặng vào bộ nhớ.
     from pipeline_runner import run_pipeline
 
+    # `result` giữ toàn bộ state cuối, còn `summary` là bản rút gọn để log/UI dùng nhanh.
     result, summary = run_pipeline(run_mode="publish", run_profile=run_profile)
 
     # ── Log kết quả ─────────────────────────────────────────────────
+    # Tách sẵn các chỉ số quan trọng để phần log cuối dễ đọc và dễ chỉnh format.
     elapsed = summary["elapsed_seconds"]
     raw_count = summary["raw_count"]
     grok_scout_count = summary.get("grok_scout_count", 0)
@@ -101,7 +107,7 @@ def main() -> None:
     # ── Print summary ra stdout ─────────────────────────────────────
     summary = result.get("summary_vn", "")
     if summary:
-        # Strip HTML tags cho console output
+        # Bản summary có thể chứa HTML để render đẹp ở nơi khác, nhưng console chỉ cần text thô.
         import re
         clean = re.sub(r"<[^>]+>", "", summary)
         print("\n" + clean)
