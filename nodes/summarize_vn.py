@@ -32,6 +32,17 @@ BAD_PHRASES = [
     "chỉ mang tính tín hiệu",
 ]
 
+BOILERPLATE_SOURCE_MARKERS = [
+    "Hacker News API",
+    "GitHub API",
+    "theo bài viết",
+    "được đăng trên",
+]
+
+BOILERPLATE_PREFIXES = [
+    "GitHub repo của",
+]
+
 
 def _dynamic_per_type_limit(*article_groups: list[dict[str, Any]]) -> int:
     lane_counts: dict[str, int] = {}
@@ -67,6 +78,12 @@ def _telegram_eligible_articles(articles: list[dict[str, Any]]) -> list[dict[str
         if summary.count("(") >= 2 and any(
             marker in summary for marker in ["API", "Hacker News", "GitHub", "theo bài viết"]
         ):
+            skipped += 1
+            continue
+        if any(marker in summary for marker in BOILERPLATE_SOURCE_MARKERS) and len(summary) < 140:
+            skipped += 1
+            continue
+        if any(summary.startswith(prefix) for prefix in BOILERPLATE_PREFIXES) and len(summary) < 240:
             skipped += 1
             continue
         eligible.append(article)
