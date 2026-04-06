@@ -12,10 +12,12 @@ from __future__ import annotations
 OFFICIAL_SOURCE_DOMAINS: list[str] = [
     "openai.com",
     "anthropic.com",
+    "ai.meta.com",
     "about.fb.com",
     "blog.google",
     "deepmind.google",
     "huggingface.co",
+    "mistral.ai",
     "blogs.microsoft.com",
     "nvidianews.nvidia.com",
     "aws.amazon.com",
@@ -78,11 +80,13 @@ SUPPLEMENTAL_BLOCKED_DOMAINS: list[str] = [
 SUPPLEMENTAL_TRUSTED_DOMAINS: list[str] = [
     "openai.com",
     "anthropic.com",
+    "ai.meta.com",
     "about.fb.com",
     "blog.google",
     "googleblog.com",
     "deepmind.google",
     "huggingface.co",
+    "mistral.ai",
     "aws.amazon.com",
     "techcrunch.com",
     "theverge.com",
@@ -174,4 +178,3 @@ def classify_source_kind(
     if normalized_quality == "review":
         return "review", SOURCE_PRIORITY_BY_KIND["review"]
     return "unknown", SOURCE_PRIORITY_BY_KIND["unknown"]
-

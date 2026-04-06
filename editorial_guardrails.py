@@ -646,7 +646,7 @@ def build_safe_digest_messages(
     include_empty_sections: bool = True,
     allow_high_priority_overflow: bool = False,
 ) -> list[str]:
-    """Build six deterministic Telegram messages, one per type."""
+    """Build deterministic Telegram messages, one per editorial lane."""
     today_label = _today_label(today)
     notion_map_by_title = {
         str(page.get("title", "")): str(page.get("url", ""))
@@ -672,19 +672,19 @@ def build_safe_digest_messages(
         )
         if not selected and not include_empty_sections:
             continue
-        lines = [f"<b>{emoji} {escape(section_type)} | AI Daily Brief | {today_label}</b>"]
+        lines = [f"<b>{emoji} {escape(section_type)} | {today_label}</b>"]
 
         if not selected:
             lines.extend(
                 [
                     "",
-                    "Chưa có tin nổi bật cho nhóm này ở lượt chạy hiện tại.",
+                    "Lane này hôm nay hơi yên, chưa có bài nào đủ chắc để đưa lên brief chính.",
                 ]
             )
             messages.append("\n".join(lines).strip())
             continue
 
-        for index, article in enumerate(selected, 1):
+        for article in selected:
             title = escape(_clean_title_text(article.get("title", "Untitled")))
             base_summary = (
                 article.get("telegram_blurb_vi")
@@ -711,7 +711,7 @@ def build_safe_digest_messages(
             link = _article_link(article, notion_map_by_title, notion_map_by_source_url)
             block_lines = [
                 "",
-                f"{index}. <b>{title}</b>",
+                f"<b>{title}</b>",
                 escape(summary),
             ]
             if link:
@@ -840,7 +840,7 @@ def build_safe_digest(
         notion_pages,
         history_articles=history_articles,
         today=today,
-        per_type=min(max_articles, 3),
+        per_type=max(1, max_articles),
         allow_archive_replay=allow_archive_replay,
         include_empty_sections=include_empty_sections,
         allow_high_priority_overflow=allow_high_priority_overflow,
@@ -858,7 +858,7 @@ def validate_telegram_summary(
     Return deterministic warnings for risky or malformed Telegram output.
     """
     warnings: list[str] = []
-    expected_header = f"<b>AI Daily Brief | {_today_label(today)}</b>"
+    today_label = _today_label(today)
     text = summary or ""
     notion_urls = {
         _normalize_link_url(page.get("url", ""))
@@ -878,7 +878,7 @@ def validate_telegram_summary(
 
     if not text.strip().startswith("<b>"):
         warnings.append("missing_or_wrong_header")
-    elif expected_header not in text and "AI Daily Brief |" not in text:
+    elif today_label not in text and not re.search(r"\|\s*\d{2}/\d{2}(?:/\d{4})?\b", text):
         warnings.append("missing_or_wrong_header")
     if MARKDOWN_LINK_RE.search(text):
         warnings.append("markdown_links_present")
@@ -888,8 +888,11 @@ def validate_telegram_summary(
         warnings.append("message_too_long")
     if "\n---" in text or text.strip().startswith("---"):
         warnings.append("separator_style_present")
-    numbered_lines = re.findall(r"^\d+\..*$", text, re.MULTILINE)
-    if "<b>" in text and "AI Daily Brief |" not in text:
+    if "<b>" in text and "AI Daily Brief |" not in text and not any(
+        label in text
+        for type_name, _emoji in TYPE_ORDER
+        for label in (type_name, escape(type_name))
+    ):
         warnings.append("missing_type_label")
     if text.count("<b>") != text.count("</b>"):
         warnings.append("unbalanced_bold_tags")
@@ -898,7 +901,8 @@ def validate_telegram_summary(
 
     hrefs = [_normalize_link_url(url) for url in HTML_LINK_RE.findall(text)]
     allowed_urls = notion_urls | source_urls
-    if allowed_urls and numbered_lines and not hrefs:
+    contains_article_body = text.count("<b>") > 1
+    if allowed_urls and contains_article_body and not hrefs:
         warnings.append("missing_notion_links")
     if allowed_urls and any(url and url not in allowed_urls for url in hrefs):
         warnings.append("unknown_links_present")

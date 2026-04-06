@@ -36,6 +36,7 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from db import save_article
+from executive_intelligence import build_topic_pages_payload, write_topic_page_artifacts
 from editorial_guardrails import build_article_grounding
 from memory import store_article
 from source_history import record_source_history_run
@@ -196,12 +197,16 @@ def _storage_primary_type(article: dict[str, Any], confidence_label: str = "") -
         and confidence in {"", "low", "medium"}
     )
     if not weak_thin_article:
+        if current_type in {"Research", "Business"}:
+            return "Product"
+        if current_type in {"Policy", "Policy & Ethics", "Society"}:
+            return "Society & Culture"
         return current_type
 
     if any(keyword in title for keyword in STORAGE_POLICY_KEYWORDS):
-        return "Policy"
+        return "Society & Culture"
     if any(keyword in title for keyword in STORAGE_BUSINESS_KEYWORDS):
-        return "Business"
+        return "Product"
     if any(keyword in title for keyword in STORAGE_PRODUCT_KEYWORDS):
         return "Product"
     return "Practical"
@@ -885,6 +890,159 @@ def _find_existing_notion_page_url(
     return str(first.get("url", "") or "").strip() or None
 
 
+def _find_existing_notion_title_page_url(
+    notion,
+    parent: dict[str, str],
+    property_map: dict[str, str],
+    title: str,
+) -> str | None:
+    title_prop = property_map.get("title")
+    if not notion or not title_prop or not title:
+        return None
+
+    payload = {
+        "filter": {
+            "property": title_prop,
+            "title": {"equals": title},
+        },
+        "page_size": 1,
+    }
+
+    try:
+        if parent.get("data_source_id") and hasattr(notion, "data_sources"):
+            response = notion.data_sources.query(data_source_id=parent["data_source_id"], **payload)
+        elif parent.get("database_id"):
+            response = notion.databases.query(database_id=parent["database_id"], **payload)
+        else:
+            return None
+    except Exception as exc:
+        logger.debug("Notion topic lookup skipped for %s: %s", title, exc)
+        if parent.get("data_source_id") and parent.get("database_id"):
+            try:
+                response = notion.databases.query(database_id=parent["database_id"], **payload)
+            except Exception as fallback_exc:
+                logger.debug("Notion topic fallback lookup skipped for %s: %s", title, fallback_exc)
+                return None
+        else:
+            return None
+
+    results = response.get("results", []) if isinstance(response, dict) else []
+    if not results:
+        return None
+    first = results[0] if isinstance(results[0], dict) else {}
+    return str(first.get("url", "") or "").strip() or None
+
+
+def _build_topic_page_children(topic_page: dict[str, Any]) -> list[dict[str, Any]]:
+    summary = str(topic_page.get("summary", "") or "").strip()
+    lane_breakdown = dict(topic_page.get("lane_breakdown", {}) or {})
+    lines = [
+        f"Topic group: {topic_page.get('topic_group', 'Topic')}",
+        f"Signals in current batch: {int(topic_page.get('signal_count', 0) or 0)}",
+    ]
+    if lane_breakdown:
+        lines.append(
+            "Lane breakdown: "
+            + ", ".join(f"{key}={value}" for key, value in lane_breakdown.items())
+        )
+
+    children = [
+        {
+            "object": "block",
+            "type": "callout",
+            "callout": {
+                "icon": {"type": "emoji", "emoji": "🧭"},
+                "rich_text": [{"type": "text", "text": {"content": _truncate(" | ".join(lines), 1800)}}],
+            },
+        }
+    ]
+
+    if summary:
+        children.append({
+            "object": "block",
+            "type": "paragraph",
+            "paragraph": {
+                "rich_text": [{"type": "text", "text": {"content": _truncate(summary)}}]
+            },
+        })
+
+    children.append({
+        "object": "block",
+        "type": "heading_2",
+        "heading_2": {"rich_text": [{"type": "text", "text": {"content": "Signals"}}]},
+    })
+    for article in list(topic_page.get("articles", []) or [])[:5]:
+        title = str(article.get("title", "") or "Untitled").strip()
+        score = int(article.get("total_score", article.get("relevance_score", 0)) or 0)
+        source = str(article.get("source", article.get("source_domain", "")) or "").strip()
+        children.append({
+            "object": "block",
+            "type": "bulleted_list_item",
+            "bulleted_list_item": {
+                "rich_text": [{
+                    "type": "text",
+                    "text": {"content": _truncate(f"{title} ({score}/100) — {source}", 1800)},
+                }]
+            },
+        })
+    return children
+
+
+def _sync_topic_pages_to_notion(
+    notion,
+    topic_database_id: str,
+    topic_pages: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    if not notion or not topic_database_id or not topic_pages:
+        return []
+
+    notion_parent, database_properties = _get_notion_parent_and_properties(notion, topic_database_id)
+    property_map = _resolve_property_map(database_properties)
+    title_prop = property_map.get("title", "Name")
+    summary_prop = property_map.get("summary")
+    tags_prop = property_map.get("tags")
+    synced: list[dict[str, Any]] = []
+
+    for topic_page in topic_pages:
+        topic = str(topic_page.get("topic", "") or "").strip()
+        if not topic:
+            continue
+        notion_url = _find_existing_notion_title_page_url(notion, notion_parent, property_map, topic)
+        if not notion_url:
+            properties = {
+                title_prop: {
+                    "title": [{"text": {"content": topic[:100]}}],
+                },
+            }
+            if summary_prop and topic_page.get("summary"):
+                properties[summary_prop] = {
+                    "rich_text": [{"type": "text", "text": {"content": _truncate(str(topic_page.get("summary", "")))}}],
+                }
+            if tags_prop:
+                tags = [str(topic_page.get("topic_group", "Topic") or "Topic")]
+                properties[tags_prop] = {"multi_select": [{"name": tag[:50]} for tag in tags]}
+            try:
+                response = notion.pages.create(
+                    parent=notion_parent,
+                    properties=properties,
+                    children=_build_topic_page_children(topic_page),
+                )
+                notion_url = str(response.get("url", "") or "").strip()
+            except Exception as exc:
+                logger.warning("⚠️ Topic page create failed for '%s': %s", topic, exc)
+                notion_url = ""
+        if notion_url:
+            synced.append(
+                {
+                    "topic": topic,
+                    "topic_group": str(topic_page.get("topic_group", "Topic") or "Topic"),
+                    "signal_count": int(topic_page.get("signal_count", 0) or 0),
+                    "url": notion_url,
+                }
+            )
+    return synced
+
+
 def save_notion_node(state: dict[str, Any]) -> dict[str, Any]:
     """
     LangGraph node: lưu tất cả bài vào Notion + ChromaDB memory.
@@ -899,6 +1057,7 @@ def save_notion_node(state: dict[str, Any]) -> dict[str, Any]:
     """
     notion_token = os.getenv("NOTION_TOKEN")
     database_id = os.getenv("NOTION_DATABASE_ID")
+    topic_database_id = os.getenv("NOTION_TOPIC_DATABASE_ID")
     publish_notion = bool(state.get("publish_notion", True))
     persist_local = bool(state.get("persist_local", True))
 
@@ -916,7 +1075,7 @@ def save_notion_node(state: dict[str, Any]) -> dict[str, Any]:
 
     if not all_articles:
         logger.info("📭 Không có bài nào để lưu.")
-        return {"notion_pages": []}
+        return {"notion_pages": [], "topic_pages": []}
 
     # Không lưu các bài không đủ liên quan AI hoặc nhìn giống landing/search page.
     # Mục tiêu là tránh làm bẩn Notion/history rồi vài hôm sau archive lại nhắc nhầm.
@@ -932,9 +1091,10 @@ def save_notion_node(state: dict[str, Any]) -> dict[str, Any]:
 
     if not all_articles:
         logger.info("📭 Không còn bài nào phù hợp để lưu sau khi lọc off-topic.")
-        return {"notion_pages": []}
+        return {"notion_pages": [], "topic_pages": []}
 
     notion_pages = []
+    topic_pages: list[dict[str, Any]] = []
     notion_available = bool(notion_token and database_id and publish_notion)
     database_properties: dict[str, Any] = {}
     notion_parent: dict[str, str] = {"database_id": database_id} if database_id else {}
@@ -1017,6 +1177,16 @@ def save_notion_node(state: dict[str, Any]) -> dict[str, Any]:
                 url=url,
             )
 
+    try:
+        topic_page_payloads = build_topic_pages_payload(all_articles)
+        topic_pages = write_topic_page_artifacts(topic_page_payloads)
+        if notion and notion_available and topic_database_id:
+            notion_topic_pages = _sync_topic_pages_to_notion(notion, topic_database_id, topic_page_payloads)
+            if notion_topic_pages:
+                topic_pages = notion_topic_pages
+    except Exception as exc:
+        logger.warning("Topic page sync/artifact generation skipped: %s", exc)
+
     logger.info(
         "✅ Saved %d articles (Notion: %s, Memory/SQLite: %s)",
         len(all_articles),
@@ -1031,4 +1201,4 @@ def save_notion_node(state: dict[str, Any]) -> dict[str, Any]:
         except Exception as exc:
             logger.warning("Source history update skipped: %s", exc)
 
-    return {"notion_pages": notion_pages}
+    return {"notion_pages": notion_pages, "topic_pages": topic_pages}

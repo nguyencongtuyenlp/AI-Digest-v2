@@ -39,8 +39,8 @@ def apply_runtime_preset(profile: str, current: dict[str, Any]) -> dict[str, Any
         # - giảm nguồn chậm
         # - giảm bớt breadth GitHub để main brief đỡ bị repo noise lấn át
         # - vẫn giữ tối thiểu một chút classify/deep để preview còn phản ánh chất lượng thật
-        current_min_score = _safe_int(merged.get("min_deep_analysis_score", 60), 60)
-        current_max_classify = _safe_int(merged.get("max_classify_articles", 8), 8)
+        current_min_score = _safe_int(merged.get("min_deep_analysis_score", 55), 55)
+        current_max_classify = _safe_int(merged.get("max_classify_articles", 12), 12)
         current_max_deep = _safe_int(merged.get("max_deep_analysis_articles", 2), 2)
         current_rss_hours = _safe_int(merged.get("gather_rss_hours", 72), 72)
         current_github_repos = _safe_int(merged.get("github_max_watchlist_repos", 6), 6)
@@ -78,6 +78,7 @@ def apply_runtime_preset(profile: str, current: dict[str, Any]) -> dict[str, Any
                 "enable_hn": False,
                 "enable_reddit": False,
                 "enable_telegram_channels": False,
+                "enable_facebook_auto": False,
             }
         )
         fast_model = os.getenv("MLX_FAST_MODEL", "").strip()
@@ -91,7 +92,7 @@ def apply_runtime_preset(profile: str, current: dict[str, Any]) -> dict[str, Any
         # - giữ backbone local + routing hiện tại
         # - mở rộng shortlist và search rescue vừa phải để so output với mode thường
         # - vẫn giữ budget cap để một run/ngày không phình chi phí quá mạnh
-        current_max_classify = _safe_int(merged.get("max_classify_articles", 10), 10)
+        current_max_classify = _safe_int(merged.get("max_classify_articles", 25), 25)
         current_max_deep = _safe_int(merged.get("max_deep_analysis_articles", 5), 5)
         current_rss_hours = _safe_int(merged.get("gather_rss_hours", 72), 72)
         current_github_repos = _safe_int(merged.get("github_max_watchlist_repos", 6), 6)
@@ -104,7 +105,9 @@ def apply_runtime_preset(profile: str, current: dict[str, Any]) -> dict[str, Any
 
         merged.update(
             {
-                "max_classify_articles": min(16, max(12, current_max_classify)),
+                "max_classify_articles": min(25, max(12, current_max_classify)),
+                "min_deep_analysis_score": min(58, max(52, _safe_int(merged.get("min_deep_analysis_score", 55), 55))),
+                "ddg_max_results_per_query": min(2, max(1, _safe_int(merged.get("ddg_max_results_per_query", 2), 2))),
                 "max_deep_analysis_articles": min(6, max(5, current_max_deep)),
                 "gather_rss_hours": max(72, min(96, current_rss_hours)),
                 "github_max_watchlist_repos": min(8, max(6, current_github_repos)),
@@ -130,7 +133,7 @@ def apply_runtime_preset(profile: str, current: dict[str, Any]) -> dict[str, Any
                 "grok_final_editor_max_articles": 10,
                 "enable_grok_news_copy": True,
                 "grok_news_copy_max_articles": 24,
-                "enable_grok_facebook_score": True,
+                "enable_grok_facebook_score": False,
                 "grok_facebook_max_articles": 10,
                 "enable_grok_source_gap": True,
                 "grok_source_gap_max_articles": 14,
@@ -140,7 +143,7 @@ def apply_runtime_preset(profile: str, current: dict[str, Any]) -> dict[str, Any
                 "grok_scout_min_official_articles": 10,
                 "grok_scout_min_official_plus_media": 12,
                 "grok_scout_min_non_github_articles": 24,
-                "enable_facebook_auto": True,
+                "enable_facebook_auto": False,
                 "enable_social_signals": True,
                 "enable_grok_x_scout": True,
                 "grok_x_scout_max_queries": 3,

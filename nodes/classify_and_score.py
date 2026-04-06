@@ -2,17 +2,14 @@
 classify_and_score.py — LangGraph node: Phân loại + chấm relevance theo vai "editorial triage".
 
 Mục tiêu là để Qwen local đóng vai tương tự một bộ lọc kiểu Claude:
-  1. Classify: gán 1 trong 6 Primary Types
+  1. Classify: gán 1 trong 3 editorial lanes
   2. Score: chấm 1-100 dựa trên 3 tiêu chí
   3. Decision: quyết định bài nào cần phân tích sâu, bài nào chỉ lưu cơ bản
 
-6 Primary Types:
-  🔬 Research    — Nghiên cứu mới, paper, benchmark, thuật toán mới, bài báo công nghệ tốt cho tối ưu AI trên phần cứng nhỏ mà có sức mạnh lớn,...
-  🚀 Product     — Ra mắt sản phẩm, tính năng, API mới, mô hình AI mới, các sản phẩm AI mới, các sản phẩm AI thiết bị biên, ...
-  💼 Business    — M&A, funding, chiến lược, nhân sự, doanh thu, lợi nhuận, ...
-  ⚖️ Policy      — Luật, quy định, đạo đức AI, chính sách,...
-  🌍 Society     — Tác động xã hội, văn hóa, giáo dục, ứng dụng AI vào giáo dục, vào xã hội, vào y tế, vào kinh doanh, ...
-  🛠️ Practical   — Hướng dẫn, tips, tools, tutorials, ứng dụng AI vào đời sống,...
+3 editorial lanes:
+  🚀 Product            — Ra mắt sản phẩm, tính năng, API, model, platform update
+  🌍 Society & Culture  — Tác động xã hội, giáo dục, công việc, cộng đồng, policy/public response
+  🛠️ Practical          — Hướng dẫn, tips, workflows, tools, best practices
 
 3 Tiêu chí chấm điểm (mỗi tiêu chí 0-33 điểm, tổng max 100):
   C1. Chất lượng tin: Relevance, Timeliness, Impact, Source credibility, những người đầu ngành nói gì về nó,...
@@ -399,9 +396,8 @@ TAG_PRIORITY: tuple[str, ...] = (
 )
 
 TAG_TYPE_DEFAULTS: dict[str, str] = {
-    "Research": "research",
     "Product": "product_update",
-    "Policy": "regulation",
+    "Society & Culture": "education",
     "Practical": "developer_tools",
 }
 
@@ -415,13 +411,10 @@ CLASSIFY_SCORE_SYSTEM = """Bạn là Editorial Triage Lead cho một sản phẩ
 Nhiệm vụ: đọc nhanh từng nguồn tin AI/Tech, chấm điểm relevance như một biên tập viên khó tính,
 và quyết định bài nào đáng được đưa vào phân tích sâu.
 
-## 6 Primary Types (CHỌN ĐÚNG 1):
-- 🔬 Research: Nghiên cứu mới, paper khoa học, benchmark, thuật toán mới
-- 🚀 Product: Ra mắt sản phẩm, tính năng mới, API, platform update
-- 💼 Business: M&A, funding, chiến lược kinh doanh, tuyển dụng, cạnh tranh
-- ⚖️ Policy: Luật pháp, quy định, đạo đức AI, governance
-- 🌍 Society: Tác động xã hội, văn hóa, giáo dục, việc làm
-- 🛠️ Practical: Hướng dẫn, tips, tools, tutorials, best practices
+## 3 Editorial Lanes (CHỌN ĐÚNG 1):
+- 🚀 Product: Ra mắt sản phẩm, tính năng mới, API, model, platform update, capability jump có tính sản phẩm
+- 🌍 Society & Culture: Tác động xã hội, giáo dục, việc làm, cộng đồng, policy/public response
+- 🛠️ Practical: Hướng dẫn, tips, workflows, playbook, tool usage, implementation lessons
 
 ## 3 Tiêu chí chấm điểm (mỗi tiêu chí 0-33, tổng max 100):
 
@@ -447,8 +440,10 @@ Công ty đang phát triển 4 MVP:
 - Có công nghệ/ý tưởng mới áp dụng được?
 
 ## Rules bổ sung:
-- Ưu tiên phân loại `Business` nếu bài nói về cạnh tranh thị trường, open-source race, partnership, strategic move, market lead, ecosystem control, hoặc tác động đến vị thế công ty/quốc gia trong ngành.
-- Chỉ chọn `Policy` nếu trọng tâm chính là luật, quy định, compliance, governance, an toàn, hoặc can thiệp của cơ quan quản lý.
+- Nếu bài vốn mang màu research/business/policy nhưng có giá trị rõ nhất ở góc sản phẩm, xếp vào `Product`.
+- Nếu bài phản ánh tác động tới con người, xã hội, giáo dục, công việc hoặc phản ứng chính sách/cộng đồng, xếp vào `Society & Culture`.
+- Nếu bài thiên về hướng dẫn dùng tool, workflow, implementation, cách làm thực tế, xếp vào `Practical`.
+- Nếu bài research/business/policy không fit rõ vào 3 lane trên, hãy hạ điểm và nghiêng về `skip` hoặc `basic` thay vì cố nhét.
 - Cấp độ phù hợp (relevance_level): High (Tổng C1+C2+C3 >= 70), Medium (40-69), Low (< 40)
 - Mức xử lý (analysis_tier):
   - deep: bài đủ mạnh để đầu tư research/thinking sâu
@@ -468,8 +463,8 @@ __TAG_TAXONOMY__
 
 ## Output: JSON (KHÔNG markdown, KHÔNG giải thích thêm)
 {
-  "primary_type": "Research|Product|Business|Policy|Society|Practical",
-  "primary_emoji": "🔬|🚀|💼|⚖️|🌍|🛠️",
+  "primary_type": "Product|Society & Culture|Practical",
+  "primary_emoji": "🚀|🌍|🛠️",
   "c1_score": 0-33,
   "c1_reason": "Giải thích ngắn gọn (1 câu)",
   "c2_score": 0-33,
@@ -525,9 +520,49 @@ YÊU CẦU LẦN 3:
 - Nếu thiếu dữ liệu, vẫn phải điền score thấp và chọn `skip` hoặc `basic`, không được bỏ JSON.
 """
 
+CLASSIFY_RESPONSE_FORMAT: dict[str, Any] = {
+    "type": "json_schema",
+    "json_schema": {
+        "name": "classify_score_article",
+        "strict": True,
+        "schema": {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "primary_type": {"type": "string", "enum": ["Product", "Society & Culture", "Practical"]},
+                "primary_emoji": {"type": "string", "enum": ["🚀", "🌍", "🛠️"]},
+                "c1_score": {"type": "integer", "minimum": 0, "maximum": 33},
+                "c1_reason": {"type": "string"},
+                "c2_score": {"type": "integer", "minimum": 0, "maximum": 33},
+                "c2_reason": {"type": "string"},
+                "c3_score": {"type": "integer", "minimum": 0, "maximum": 34},
+                "c3_reason": {"type": "string"},
+                "summary_vi": {"type": "string"},
+                "editorial_angle": {"type": "string"},
+                "analysis_tier": {"type": "string", "enum": ["deep", "basic", "skip"]},
+                "tags": {"type": "array", "items": {"type": "string"}, "maxItems": 3},
+                "relevance_level": {"type": "string", "enum": ["High", "Medium", "Low"]},
+            },
+            "required": [
+                "primary_type",
+                "primary_emoji",
+                "c1_score",
+                "c1_reason",
+                "c2_score",
+                "c2_reason",
+                "c3_score",
+                "c3_reason",
+                "summary_vi",
+                "editorial_angle",
+                "analysis_tier",
+                "tags",
+                "relevance_level",
+            ],
+        },
+    },
+}
+
 PROSE_TYPE_HINTS: dict[str, tuple[str, ...]] = {
-    "Policy": POLICY_KEYWORDS + ("luật", "pháp lý", "quan ly"),
-    "Business": BUSINESS_KEYWORDS,
     "Product": (
         "launch",
         "launches",
@@ -544,20 +579,32 @@ PROSE_TYPE_HINTS: dict[str, tuple[str, ...]] = {
         "ra mat",
         "công bố",
         "cong bo",
+        "benchmark",
+        "paper",
+        "research",
+        "funding",
+        "partnership",
+        "partners with",
     ),
-    "Research": ("paper", "research", "benchmark", "study", "nghiên cứu"),
+    "Society & Culture": POLICY_KEYWORDS + BUSINESS_KEYWORDS + SOCIETY_KEYWORDS + (
+        "jobs",
+        "workforce",
+        "law",
+        "regulation",
+        "policy",
+        "education",
+        "community",
+    ),
     "Practical": ("tutorial", "guide", "tool", "workflow", "tips"),
 }
 
 
 def _prefilter_primary_type(title: str) -> tuple[str, str]:
     lowered = str(title or "").lower()
-    if any(token in lowered for token in POLICY_KEYWORDS + ("luật", "pháp lý", "quan ly")):
-        return "Policy", "⚖️"
-    if any(token in lowered for token in ("paper", "research", "benchmark", "study", "nghiên cứu")):
-        return "Research", "🔬"
-    if any(token in lowered for token in BUSINESS_KEYWORDS):
-        return "Business", "💼"
+    if any(token in lowered for token in ("tutorial", "guide", "tool", "workflow", "tips", "playbook", "how to")):
+        return "Practical", "🛠️"
+    if any(token in lowered for token in POLICY_KEYWORDS + SOCIETY_KEYWORDS + ("luật", "pháp lý", "quan ly", "jobs", "workforce")):
+        return "Society & Culture", "🌍"
     if any(
         token in lowered
         for token in (
@@ -576,12 +623,14 @@ def _prefilter_primary_type(title: str) -> tuple[str, str]:
             "ra mat",
             "công bố",
             "cong bo",
+            "paper",
+            "research",
+            "benchmark",
+            "study",
         )
-    ):
+    ) or any(token in lowered for token in BUSINESS_KEYWORDS):
         return "Product", "🚀"
-    if any(token in lowered for token in ("tutorial", "guide", "tool", "workflow", "tips")):
-        return "Practical", "🛠️"
-    return "Society", "🌍"
+    return "Society & Culture", "🌍"
 
 
 def run_json_inference(
@@ -590,6 +639,7 @@ def run_json_inference(
     *,
     max_tokens: int,
     temperature: float,
+    response_format: dict[str, Any] | None = None,
 ) -> tuple[dict | list | None, str, bool]:
     """
     Local compatibility wrapper for classify inference.
@@ -602,6 +652,7 @@ def run_json_inference(
         user_prompt,
         max_tokens=max_tokens,
         temperature=temperature,
+        response_format=response_format,
     )
 
 
@@ -708,6 +759,7 @@ def _classify_inference_with_retry(
             user_prompt,
             max_tokens=max_tokens,
             temperature=temperature,
+            response_format=CLASSIFY_RESPONSE_FORMAT,
         )
     result, raw, looks_structured = _normalize_classify_inference_response(initial_response)
     if result and isinstance(result, dict):
@@ -733,6 +785,7 @@ def _classify_inference_with_retry(
             retry_prompt,
             max_tokens=max_tokens,
             temperature=0.0,
+            response_format=CLASSIFY_RESPONSE_FORMAT,
         )
     )
     if retry_result and isinstance(retry_result, dict):
@@ -752,6 +805,7 @@ def _classify_inference_with_retry(
             last_chance_prompt,
             max_tokens=min(max_tokens, 220),
             temperature=0.0,
+            response_format=CLASSIFY_RESPONSE_FORMAT,
         )
     )
     if final_result and isinstance(final_result, dict):
@@ -852,9 +906,13 @@ def _llm_failure_fallback(article: dict[str, Any], min_score: int) -> None:
     article["editorial_angle"] = sanitize_delivery_text(article.get("editorial_angle", ""), max_len=180)
 
 
-def _prefilter_score(article: dict[str, Any]) -> tuple[int, list[str]]:
+def _prefilter_score(
+    article: dict[str, Any],
+    feedback_preferences: dict[str, Any] | None = None,
+) -> tuple[int, list[str]]:
     score = 0
     reasons: list[str] = []
+    preferences = dict(feedback_preferences or {})
     title = str(article.get("title", "") or "")
     lowered_title = title.lower()
     lowered_text = " ".join(
@@ -1000,6 +1058,34 @@ def _prefilter_score(article: dict[str, Any]) -> tuple[int, list[str]]:
         score -= 12
         reasons.append("stale-12")
 
+    predicted_type = str(_prefilter_primary_type(title)[0] or "").strip().lower()
+    predicted_type_aliases = {
+        predicted_type,
+        predicted_type.replace(" & culture", ""),
+        predicted_type.replace(" ", "_"),
+        predicted_type.replace(" & ", "_"),
+    }
+    preferred_types = {
+        str(item or "").strip().lower()
+        for item in preferences.get("preferred_types", [])
+        if str(item or "").strip()
+    }
+    if preferences.get("strict_source_review") and source_tier in {"c", "unknown"}:
+        score -= 2
+        reasons.append("feedback_strict_source-2")
+    if preferences.get("prefer_founder_angle") and (watchlist_hit or founder_hits > 0):
+        score += 2
+        reasons.append("feedback_founder+2")
+    if preferences.get("prefer_depth") and article.get("content_available") and source_tier in {"a", "b"}:
+        score += 1
+        reasons.append("feedback_depth+1")
+    if preferences.get("prefer_freshness") and freshness_bucket in {"breaking", "fresh", "recent"}:
+        score += 1
+        reasons.append("feedback_freshness+1")
+    if preferred_types and predicted_type_aliases & preferred_types:
+        score += 1
+        reasons.append("feedback_type_fit+1")
+
     return score, reasons
 
 
@@ -1110,11 +1196,12 @@ def _prepare_classify_candidates(
     *,
     runtime_config: dict[str, Any] | None = None,
     feedback_summary_text: str = "",
+    feedback_preferences: dict[str, Any] | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     ranked: list[dict[str, Any]] = []
     deprioritized: list[dict[str, Any]] = []
     for article in articles:
-        prefilter_score, reasons = _prefilter_score(article)
+        prefilter_score, reasons = _prefilter_score(article, feedback_preferences=feedback_preferences)
         article["prefilter_score"] = prefilter_score
         article["prefilter_reasons"] = reasons
         article["prefilter_primary_type"] = _prefilter_predicted_type(article)
@@ -1256,10 +1343,10 @@ def _apply_strategic_boost(article: dict[str, Any], min_score: int) -> None:
     current_type = str(article.get("primary_type", ""))
     score = int(article.get("total_score", 0) or 0)
 
-    # Kéo `Policy` về `Business` nếu bản chất là cuộc đua/chien luoc thi truong.
-    if current_type == "Policy":
-        article["primary_type"] = "Business"
-        article["primary_emoji"] = "💼"
+    # Tin chiến lược nguồn mạnh thường nên nằm ở lane Product thay vì bị drift sang legacy policy/business.
+    if current_type in {"Policy", "Policy & Ethics", "Business", "Research"}:
+        article["primary_type"] = "Product"
+        article["primary_emoji"] = "🚀"
 
     # Nguồn mạnh + tín hiệu chiến lược + score đã khá gần ngưỡng thì đẩy lên deep.
     if score >= max(40, min_score - 20):
@@ -1621,29 +1708,33 @@ def _normalize_primary_type(article: dict[str, Any]) -> None:
             article["primary_emoji"] = "🛠️"
             return
 
-    # Ecosystem/community stories nên ưu tiên Society, kể cả có chữ "cạnh tranh".
+    if current_type in {"Research", "Business"}:
+        article["primary_type"] = "Product"
+        article["primary_emoji"] = "🚀"
+        current_type = "Product"
+    elif current_type in {"Policy", "Policy & Ethics", "Society"}:
+        article["primary_type"] = "Society & Culture"
+        article["primary_emoji"] = "🌍"
+        current_type = "Society & Culture"
+
+    # Ecosystem/community stories nên ưu tiên Society & Culture.
     if "ecosystem" in title or "hệ sinh thái" in title or "he sinh thai" in title:
         if "startup" not in title and "partnership" not in title and "partners with" not in title:
-            article["primary_type"] = "Society"
+            article["primary_type"] = "Society & Culture"
             article["primary_emoji"] = "🌍"
             return
 
-    # Tin về startup/thi trường/cạnh tranh nên nghiêng về Business.
-    if any(keyword in title for keyword in BUSINESS_KEYWORDS):
-        article["primary_type"] = "Business"
-        article["primary_emoji"] = "💼"
-        return
-
-    # Incident/security/compliance nên nghiêng về Policy & Risk hơn Society fallback.
+    # Incident/security/compliance nên nghiêng về Society & Culture hơn legacy policy bucket.
     if any(keyword in title for keyword in POLICY_KEYWORDS):
-        article["primary_type"] = "Policy"
-        article["primary_emoji"] = "⚖️"
+        article["primary_type"] = "Society & Culture"
+        article["primary_emoji"] = "🌍"
         return
 
-    # Nguồn official mà bề mặt bài rõ là update sản phẩm thì đừng rơi nhầm về Society.
+    # Nguồn official mà bề mặt bài rõ là update sản phẩm thì đừng rơi nhầm về Society & Culture.
     if source_domain in {
         "openai.com",
         "anthropic.com",
+        "ai.meta.com",
         "about.fb.com",
         "blog.google",
         "deepmind.google",
@@ -1666,17 +1757,48 @@ def _normalize_primary_type(article: dict[str, Any]) -> None:
                 "api",
                 "sdk",
                 "glasses",
+                "benchmark",
             )
         ):
             article["primary_type"] = "Product"
             article["primary_emoji"] = "🚀"
             return
 
-    # Tin về hệ sinh thái / cộng đồng / giáo dục / bối cảnh Việt Nam nên nghiêng về Society.
+    # Tin về hệ sinh thái / cộng đồng / giáo dục / bối cảnh Việt Nam nên nghiêng về Society & Culture.
     if any(keyword in title for keyword in SOCIETY_KEYWORDS):
-        if current_type not in {"Product", "Business"} and "startup" not in title and "partnership" not in title and "partners with" not in title:
-            article["primary_type"] = "Society"
+        if current_type not in {"Product"} and "startup" not in title and "partnership" not in title and "partners with" not in title:
+            article["primary_type"] = "Society & Culture"
             article["primary_emoji"] = "🌍"
+
+
+def _select_top_articles(
+    primary_event_articles: list[dict[str, Any]],
+    *,
+    min_items: int = 3,
+    max_items: int = 10,
+) -> tuple[list[dict[str, Any]], int]:
+    if not primary_event_articles:
+        return [], 0
+
+    ranked_articles = sorted(
+        primary_event_articles,
+        key=lambda article: int(article.get("score", article.get("total_score", 0)) or 0),
+        reverse=True,
+    )
+    scores = [int(article.get("score", article.get("total_score", 0)) or 0) for article in ranked_articles]
+    ordered_scores = sorted(scores)
+    score_cutoff = ordered_scores[int(len(scores) * 0.7)] if len(scores) > 5 else 55
+    selected = [
+        article
+        for article in ranked_articles
+        if int(article.get("score", article.get("total_score", 0)) or 0) >= score_cutoff
+        or str(article.get("analysis_tier", "") or "").strip().lower() == "deep"
+    ]
+    minimum_target = min(max(min_items, 0), len(ranked_articles), max_items)
+    if len(selected) < minimum_target:
+        selected = ranked_articles[:minimum_target]
+        score_cutoff = int(selected[-1].get("score", selected[-1].get("total_score", 0)) or 0)
+    return selected[:max_items], score_cutoff
 
 
 def classify_and_score_node(state: dict[str, Any]) -> dict[str, Any]:
@@ -1696,9 +1818,9 @@ def classify_and_score_node(state: dict[str, Any]) -> dict[str, Any]:
         }
 
     # Các ngưỡng này được cho phép override từ UI để test nhanh mà không phải sửa .env.
-    min_score = _cfg_int(state, "min_deep_analysis_score", "MIN_DEEP_ANALYSIS_SCORE", 60)
+    min_score = _cfg_int(state, "min_deep_analysis_score", "MIN_DEEP_ANALYSIS_SCORE", 55)
     max_top = _cfg_int(state, "max_deep_analysis_articles", "MAX_DEEP_ANALYSIS_ARTICLES", 10)
-    max_classify = _cfg_int(state, "max_classify_articles", "MAX_CLASSIFY_ARTICLES", 8)
+    max_classify = _cfg_int(state, "max_classify_articles", "MAX_CLASSIFY_ARTICLES", 25)
     classify_content_limit = _cfg_int(state, "classify_content_char_limit", "CLASSIFY_CONTENT_CHAR_LIMIT", 900)
     classify_max_tokens = _cfg_int(state, "classify_max_tokens", "CLASSIFY_MAX_TOKENS", 320)
 
@@ -1707,6 +1829,7 @@ def classify_and_score_node(state: dict[str, Any]) -> dict[str, Any]:
         max_classify,
         runtime_config=state.get("runtime_config", {}),
         feedback_summary_text=state.get("feedback_summary_text", ""),
+        feedback_preferences=state.get("feedback_preference_profile", {}),
     )
     logger.info(
         "🧮 Prefilter giữ %d/%d bài cho 32B classify (held_out=%d, max=%d)",
@@ -1757,6 +1880,7 @@ def classify_and_score_node(state: dict[str, Any]) -> dict[str, Any]:
                     user_prompt,
                     max_tokens=classify_max_tokens,
                     temperature=0.1,
+                    response_format=CLASSIFY_RESPONSE_FORMAT,
                 )
             )
             result, raw_output, looks_structured = inference
@@ -1809,6 +1933,7 @@ def classify_and_score_node(state: dict[str, Any]) -> dict[str, Any]:
                 _apply_strategic_boost(article, min_score)
                 _apply_freshness_penalty(article, min_score)
                 _apply_source_history_adjustment(article, min_score)
+                article["score"] = int(article.get("total_score", 0) or 0)
                 _normalize_primary_type(article)
                 _normalize_article_tags(article)
                 article["score_breakdown"] = _build_score_breakdown(article)
@@ -1817,12 +1942,14 @@ def classify_and_score_node(state: dict[str, Any]) -> dict[str, Any]:
                 logger.warning("⚠️ Model không trả JSON cho '%s'", title[:40])
                 _classify_prose_rescue(article, raw_output, min_score)
                 _apply_source_history_adjustment(article, min_score)
+                article["score"] = int(article.get("total_score", 0) or 0)
                 article["score_breakdown"] = _build_score_breakdown(article)
                 article["why_surfaced"] = article["score_breakdown"]["why_surfaced"]
         except Exception as e:
             logger.error("❌ Classify failed: '%s': %s", title[:40], e)
             _llm_failure_fallback(article, min_score)
             _apply_source_history_adjustment(article, min_score)
+            article["score"] = int(article.get("total_score", 0) or 0)
             article["score_breakdown"] = _build_score_breakdown(article)
             article["why_surfaced"] = article["score_breakdown"]["why_surfaced"]
 
@@ -1831,6 +1958,7 @@ def classify_and_score_node(state: dict[str, Any]) -> dict[str, Any]:
     for article in held_out_articles:
         _held_out_article_fallback(article)
         _apply_source_history_adjustment(article, min_score)
+        article["score"] = int(article.get("total_score", 0) or 0)
         article["score_breakdown"] = _build_score_breakdown(article)
         article["why_skipped"] = article["score_breakdown"]["why_skipped"] or article["score_breakdown"]["why_surfaced"][:2]
         scored.append(article)
@@ -1841,15 +1969,15 @@ def classify_and_score_node(state: dict[str, Any]) -> dict[str, Any]:
     primary_event_articles.sort(key=lambda a: a.get("total_score", 0), reverse=True)
 
     # Chỉ deep-dive 1 bài đại diện cho mỗi event để tránh lãng phí reasoning.
-    top = [
-        a for a in primary_event_articles
-        if a.get("total_score", 0) >= min_score or a.get("analysis_tier") == "deep"
-    ][:max_top]
+    top, score_cutoff = _select_top_articles(
+        primary_event_articles,
+        max_items=max_top,
+    )
     low = [a for a in scored if a not in top]
 
     logger.info(
-        "✅ Classify+Score xong: %d bài / %d event → %d top (≥%d) + %d low",
-        len(scored), len(primary_event_articles), len(top), min_score, len(low)
+        "✅ Classify+Score xong: %d bài / %d event → %d top (cutoff=%d, max=%d) + %d low",
+        len(scored), len(primary_event_articles), len(top), score_cutoff, max_top, len(low)
     )
     scored_snapshot_path = write_temporal_snapshot(
         state=state,
@@ -1861,6 +1989,7 @@ def classify_and_score_node(state: dict[str, Any]) -> dict[str, Any]:
             "top_count": len(top),
             "low_score_count": len(low),
             "min_deep_analysis_score": min_score,
+            "dynamic_score_cutoff": score_cutoff,
             "max_deep_analysis_articles": max_top,
             "max_classify_articles": max_classify,
         },

@@ -2,7 +2,7 @@
 digest_formatter.py — Shared helpers to build the daily digest layout.
 
 The business-facing format is:
-- 6 fixed topics
+- 3 editorial lanes
 - Up to 3 articles per topic
 - Each article shows title, summary, and source link
 """
@@ -13,23 +13,20 @@ from html import escape as html_escape
 from typing import Any
 
 TYPE_ORDER: list[tuple[str, str]] = [
-    ("Research", "🔬"),
     ("Product", "🚀"),
-    ("Business", "💼"),
-    ("Policy & Ethics", "⚖️"),
     ("Society & Culture", "🌍"),
     ("Practical", "🛠️"),
 ]
 
 TYPE_ALIASES: dict[str, str] = {
-    "policy": "Policy & Ethics",
-    "policy & ethics": "Policy & Ethics",
+    "policy": "Society & Culture",
+    "policy & ethics": "Society & Culture",
     "society": "Society & Culture",
     "society & culture": "Society & Culture",
     "practical": "Practical",
-    "business": "Business",
+    "business": "Product",
     "product": "Product",
-    "research": "Research",
+    "research": "Product",
 }
 
 TYPE_TO_EMOJI = {type_name: emoji for type_name, emoji in TYPE_ORDER}

@@ -38,6 +38,7 @@ def collect_feedback_node(state: dict[str, Any]) -> dict[str, Any]:
             "recent_feedback": context["recent_feedback"],
             "feedback_summary_text": context["feedback_summary_text"],
             "feedback_label_counts": context["feedback_label_counts"],
+            "feedback_preference_profile": context.get("feedback_preference_profile", {}),
             "feedback_sync": sync_result,
         }
     except Exception as exc:
@@ -46,5 +47,6 @@ def collect_feedback_node(state: dict[str, Any]) -> dict[str, Any]:
             "recent_feedback": [],
             "feedback_summary_text": "Feedback sync lỗi hoặc chưa có dữ liệu.",
             "feedback_label_counts": {},
+            "feedback_preference_profile": {},
             "feedback_sync": {"synced": 0, "skipped": 0, "error": str(exc)},
         }

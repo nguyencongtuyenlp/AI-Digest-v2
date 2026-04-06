@@ -17,18 +17,32 @@ import os
 CURATED_RSS_FEEDS: list[str] = [
     # Official / primary sources
     "https://openai.com/news/rss.xml",
+    "https://openai.com/blog/rss.xml",
     "https://www.anthropic.com/news/rss.xml",
-    "https://blog.google/technology/ai/rss/",
-    "https://deepmind.google/discover/blog/rss.xml",
-    "https://about.fb.com/news/feed/",
+    "https://www.anthropic.com/news/rss",
+    "https://ai.meta.com/blog/rss/",
     "https://huggingface.co/blog/feed.xml",
-    "https://blogs.microsoft.com/ai/feed/",
+    "https://mistral.ai/news/rss/",
+    "https://blog.google/technology/ai/rss/",
+    "https://blogs.nvidia.com/blog/category/deep-learning/feed/",
+    "https://www.theneuron.ai/rss",
+    "https://simonwillison.net/atom/everything/",
+    "https://blog.google/technology/ai/rss",
+    "https://deepmind.google/discover/blog/rss.xml",
+    "https://deepmind.google/research/publications/rss",
+    "https://about.fb.com/news/feed/",
+    "https://ai.meta.com/blog/rss",
+    "https://mistral.ai/news/rss",
+    "https://blogs.microsoft.com/ai/feed",
     "https://nvidianews.nvidia.com/releases.xml",
+    "https://www.nvidia.com/en-us/research/ai/rss",
     "https://aws.amazon.com/blogs/machine-learning/feed/",
     "https://www.databricks.com/blog/category/ai/feed",
     "https://www.cloudflare.com/rss/tag/ai/",
+    "https://cohere.com/blog/rss",
     # Strong media / ecosystem
     "https://techcrunch.com/category/artificial-intelligence/feed/",
+    "https://www.theverge.com/ai-artificial-intelligence/rss",
     "https://www.theverge.com/ai-artificial-intelligence/rss/index.xml",
     "https://feeds.arstechnica.com/arstechnica/technology-lab",
     "https://news.mit.edu/rss/topic/artificial-intelligence2",
@@ -39,19 +53,16 @@ CURATED_RSS_FEEDS: list[str] = [
 
 # ── Search queries chỉ giữ vai trò bổ sung, không còn là nguồn lõi ────────────
 SEARCH_QUERIES_EN: list[str] = [
-    "OpenAI API model release enterprise update",
-    "Anthropic Claude API model release",
-    "Anthropic Claude Code release enterprise",
-    "Google DeepMind AI research benchmark",
-    "Meta open source AI model release",
-    "xAI Grok enterprise API update",
-    "HuggingFace open source AI release",
-    "AI infrastructure startup funding",
-    "AI security incident model leak enterprise",
-    "AI policy regulation update",
+    "OpenAI product update API model release",
+    "Anthropic Claude API Claude Code release notes",
+    "Google AI Gemini DeepMind product update",
+    "Meta AI model release open source product update",
+    "Hugging Face product update open source AI release",
+    "Mistral AI model release API update",
     "AI agents enterprise workflow launch",
     "MCP server release AI agents",
-    "browser use agent enterprise workflow",
+    "browser use agent workflow tutorial",
+    "AI workflow practical guide enterprise team",
 ]
 
 
@@ -59,11 +70,11 @@ def build_search_queries_vn() -> list[str]:
     current_year = str(os.getenv("DIGEST_CURRENT_YEAR", "")).strip()
     year = current_year or "2026"
     return [
-        "startup AI Việt Nam gọi vốn",
+        "công cụ AI mới cho doanh nghiệp Việt Nam",
         "doanh nghiệp Việt Nam ứng dụng AI",
-        "quy định luật AI Việt Nam",
-        f"mô hình AI Việt Nam {year}",
-        f"hạ tầng AI Việt Nam {year}",
+        "workflow AI thực tế cho team Việt Nam",
+        f"sản phẩm AI Việt Nam {year}",
+        f"ứng dụng AI trong giáo dục và công việc tại Việt Nam {year}",
     ]
 
 
@@ -77,12 +88,10 @@ DEFAULT_TELEGRAM_CHANNELS: list[str] = [
 ]
 
 DEFAULT_REDDIT_SUBREDDITS: list[str] = [
-    "LocalLLaMA",
     "MachineLearning",
-    "OpenAI",
-    "Anthropic",
-    "singularity",
     "artificial",
+    "LocalLLaMA",
+    "ChatGPT",
 ]
 
 DEFAULT_HN_KEYWORDS: tuple[str, ...] = (
@@ -145,4 +154,3 @@ DEFAULT_GITHUB_SEARCH_QUERIES: list[str] = [
     "agent sdk",
     "llm evals tooling",
 ]
-

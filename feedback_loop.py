@@ -37,6 +37,29 @@ FEEDBACK_COMMAND_GUIDE = [
 ]
 
 
+def _derive_feedback_preferences(
+    entries: list[dict[str, Any]],
+    label_counter: Counter[str],
+) -> dict[str, Any]:
+    expected_type_counter: Counter[str] = Counter()
+    for entry in entries:
+        for label in entry.get("labels", []) or []:
+            if str(label).startswith("expected_type:"):
+                expected_type_counter[str(label).split(":", 1)[1].strip()] += 1
+
+    promote_count = int(label_counter.get("promote_delivery", 0) or 0)
+    skip_count = int(label_counter.get("skip_delivery", 0) or 0)
+    preference_profile = {
+        "strict_source_review": int(label_counter.get("weak_source", 0) or 0) >= 2,
+        "prefer_founder_angle": int(label_counter.get("founder_lens", 0) or 0) >= 1,
+        "prefer_depth": int(label_counter.get("want_more_depth", 0) or 0) >= 1,
+        "prefer_freshness": int(label_counter.get("stale", 0) or 0) >= 1,
+        "delivery_bias": "promote" if promote_count > skip_count else "suppress" if skip_count > promote_count else "neutral",
+        "preferred_types": [key for key, _count in expected_type_counter.most_common(3)],
+    }
+    return preference_profile
+
+
 def _bot_username(bot_token: str) -> str:
     configured = str(os.getenv("TELEGRAM_BOT_USERNAME", "") or "").strip().lstrip("@")
     if configured:
@@ -240,6 +263,14 @@ def build_feedback_context(days: int = 14, limit: int = 20) -> dict[str, Any]:
                 "Lệnh gợi ý: " + " | ".join(FEEDBACK_COMMAND_GUIDE)
             ),
             "feedback_label_counts": {},
+            "feedback_preference_profile": {
+                "strict_source_review": False,
+                "prefer_founder_angle": False,
+                "prefer_depth": False,
+                "prefer_freshness": False,
+                "delivery_bias": "neutral",
+                "preferred_types": [],
+            },
         }
 
     label_counter: Counter[str] = Counter()
@@ -265,9 +296,11 @@ def build_feedback_context(days: int = 14, limit: int = 20) -> dict[str, Any]:
         + "\n\nLệnh gợi ý: "
         + " | ".join(FEEDBACK_COMMAND_GUIDE)
     )
+    preference_profile = _derive_feedback_preferences(normalized_entries, label_counter)
 
     return {
         "recent_feedback": normalized_entries,
         "feedback_summary_text": summary_text,
         "feedback_label_counts": dict(label_counter),
+        "feedback_preference_profile": preference_profile,
     }

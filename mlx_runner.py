@@ -1,32 +1,31 @@
 """
-mlx_runner.py — Shared MLX model singleton (Qwen2.5-72B).
+mlx_runner.py - Shared MLX model singleton and schema-first JSON inference.
 
-Load model một lần duy nhất khi process khởi động,
-tất cả nodes dùng chung instance này.
+The runtime API stays intentionally small:
+- run_inference(): system + user prompt -> raw text
+- run_json_inference(): system + user prompt -> parsed JSON
 
-Model mặc định: mlx-community/Qwen2.5-72B-Instruct-4bit
-  - 72B params dense → chất lượng ngang GPT-4o
-  - ~40GB RAM trên M4 Pro 48GB
-  - ~3-5 tok/s (chậm hơn 14B nhưng reasoning mạnh hơn nhiều)
-
-Hỗ trợ 2 chế độ inference:
-  1. run_inference(): System + User prompt → raw text
-  2. run_json_inference(): System + User prompt → parse JSON output
+JSON mode is now schema-first:
+- callers can pass response_format={"type":"json_schema","json_schema": {...}}
+- prompts are tightened around the schema contract
+- parsed output is validated with jsonschema when a schema is supplied
 """
 
 from __future__ import annotations
 
 import ast
 import gc
-import json
 import inspect
+import json
 import logging
 import os
 import re
+from typing import Any
+
+from jsonschema import ValidationError, validate
 
 logger = logging.getLogger(__name__)
 
-# ── Singleton model cache ────────────────────────────────────────────
 _model = None
 _tokenizer = None
 _sampler_param = None
@@ -98,18 +97,14 @@ def _release_model() -> None:
 
 
 def get_model(model_path: str | None = None):
-    """
-    Trả về (model, tokenizer) MLX đã load.
-    Load lần đầu từ HuggingFace → cache vào ~/.cache/huggingface/.
-    Các lần sau dùng cache local, không cần internet.
-    """
     global _model, _tokenizer, _loaded_model_path
     resolved_model_path = _effective_model_path(model_path)
 
     if _model is None or _loaded_model_path != resolved_model_path:
         from mlx_lm import load
+
         if _model is not None and _loaded_model_path != resolved_model_path:
-            logger.info("Switching MLX model: %s → %s", _loaded_model_path, resolved_model_path)
+            logger.info("Switching MLX model: %s -> %s", _loaded_model_path, resolved_model_path)
             _release_model()
         logger.info("Loading MLX model: %s", resolved_model_path)
         _model, _tokenizer = load(resolved_model_path)
@@ -118,42 +113,7 @@ def get_model(model_path: str | None = None):
     return _model, _tokenizer
 
 
-def _generate_with_model(
-    system_prompt: str,
-    user_prompt: str,
-    max_tokens: int,
-    temperature: float,
-    model_path: str | None = None,
-) -> str:
-    from mlx_lm import generate
-
-    model, tokenizer = get_model(model_path=model_path)
-
-    messages = [
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": user_prompt},
-    ]
-
-    prompt_text = tokenizer.apply_chat_template(
-        messages, tokenize=False, add_generation_prompt=True
-    )
-
-    sampler = _make_sampler_compatible(temperature)
-    return generate(
-        model,
-        tokenizer,
-        prompt=prompt_text,
-        max_tokens=max_tokens,
-        verbose=False,
-        sampler=sampler,
-    )
-
-
 def _make_sampler_compatible(temperature: float):
-    """
-    Tạo sampler tương thích với nhiều version `mlx_lm`.
-    Một số bản dùng `temp`, một số bản dùng `temperature`.
-    """
     from mlx_lm.sample_utils import make_sampler
 
     global _sampler_param
@@ -173,24 +133,68 @@ def _make_sampler_compatible(temperature: float):
     return make_sampler()
 
 
+def _schema_instruction(response_format: dict[str, Any] | None) -> str:
+    if not isinstance(response_format, dict):
+        return ""
+    if str(response_format.get("type", "") or "").strip().lower() != "json_schema":
+        return ""
+
+    schema_wrapper = dict(response_format.get("json_schema", {}) or {})
+    schema = dict(schema_wrapper.get("schema", {}) or {})
+    if not schema:
+        return ""
+
+    schema_name = str(schema_wrapper.get("name", "structured_output") or "structured_output").strip()
+    strict = bool(schema_wrapper.get("strict", True))
+    schema_text = json.dumps(schema, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+    return (
+        "\n\nReturn exactly one valid JSON object."
+        f"\nSchema name: {schema_name}"
+        f"\nStrict mode: {'true' if strict else 'false'}"
+        f"\nJSON schema: {schema_text}"
+        "\nDo not add markdown fences, prose, or extra keys."
+    )
+
+
+def _generate_with_model(
+    system_prompt: str,
+    user_prompt: str,
+    max_tokens: int,
+    temperature: float,
+    model_path: str | None = None,
+    response_format: dict[str, Any] | None = None,
+) -> str:
+    from mlx_lm import generate
+
+    model, tokenizer = get_model(model_path=model_path)
+    messages = [
+        {
+            "role": "system",
+            "content": f"{system_prompt.rstrip()}{_schema_instruction(response_format)}",
+        },
+        {"role": "user", "content": user_prompt},
+    ]
+
+    prompt_text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+    sampler = _make_sampler_compatible(temperature)
+    return generate(
+        model,
+        tokenizer,
+        prompt=prompt_text,
+        max_tokens=max_tokens,
+        verbose=False,
+        sampler=sampler,
+    )
+
+
 def run_inference(
     system_prompt: str,
     user_prompt: str,
     max_tokens: int = 1000,
     temperature: float = 0.7,
     model_path: str | None = None,
+    response_format: dict[str, Any] | None = None,
 ) -> str:
-    """
-    Chạy inference cơ bản: system + user prompt → raw text.
-
-    Args:
-        system_prompt: Vai trò / hướng dẫn cho model
-        user_prompt: Nội dung cần xử lý
-        max_tokens: Số token tối đa trong response
-
-    Returns:
-        Raw string output từ model
-    """
     global _runtime_fallback_model_path
 
     requested_model_path = _effective_model_path(model_path)
@@ -201,6 +205,7 @@ def run_inference(
             max_tokens=max_tokens,
             temperature=temperature,
             model_path=requested_model_path,
+            response_format=response_format,
         )
     except Exception as exc:
         auto_fallback = os.getenv("MLX_AUTO_FALLBACK", "1").strip().lower() not in {"0", "false", "no"}
@@ -219,8 +224,110 @@ def run_inference(
                 max_tokens=max_tokens,
                 temperature=temperature,
                 model_path=fallback_model,
+                response_format=response_format,
             )
         raise
+
+
+def _normalize_json_candidate(text: str) -> str:
+    cleaned = str(text or "").strip()
+    cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\s*```$", "", cleaned)
+    cleaned = cleaned.replace("“", '"').replace("”", '"').replace("’", "'").replace("‘", "'")
+    cleaned = cleaned.replace("：", ":").replace("，", ",")
+    cleaned = cleaned.replace("\u00a0", " ")
+    cleaned = re.sub(r"^\s*json\s*", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r",(\s*[}\]])", r"\1", cleaned)
+    return cleaned.strip()
+
+
+def _extract_json_payload(text: str) -> str:
+    raw = str(text or "").strip()
+    if not raw:
+        return ""
+
+    fenced = re.search(r"```(?:json)?\s*(.*?)\s*```", raw, flags=re.IGNORECASE | re.DOTALL)
+    if fenced:
+        return _normalize_json_candidate(fenced.group(1))
+
+    for opener, closer in (("{", "}"), ("[", "]")):
+        start = raw.find(opener)
+        if start == -1:
+            continue
+        depth = 0
+        in_string = False
+        escape_next = False
+        quote_char = ""
+        for index, char in enumerate(raw[start:], start=start):
+            if in_string:
+                if escape_next:
+                    escape_next = False
+                elif char == "\\":
+                    escape_next = True
+                elif char == quote_char:
+                    in_string = False
+                continue
+            if char in {'"', "'"}:
+                in_string = True
+                quote_char = char
+                continue
+            if char == opener:
+                depth += 1
+            elif char == closer:
+                depth -= 1
+                if depth == 0:
+                    return _normalize_json_candidate(raw[start:index + 1])
+    return _normalize_json_candidate(raw) if raw.startswith("{") or raw.startswith("[") else ""
+
+
+def _parse_json_candidate(candidate: str) -> dict | list | None:
+    normalized = _normalize_json_candidate(candidate)
+    if not normalized:
+        return None
+    try:
+        parsed = json.loads(normalized)
+        return parsed if isinstance(parsed, (dict, list)) else None
+    except json.JSONDecodeError:
+        pythonish = re.sub(r"\btrue\b", "True", normalized, flags=re.IGNORECASE)
+        pythonish = re.sub(r"\bfalse\b", "False", pythonish, flags=re.IGNORECASE)
+        pythonish = re.sub(r"\bnull\b", "None", pythonish, flags=re.IGNORECASE)
+        try:
+            parsed = ast.literal_eval(pythonish)
+            if isinstance(parsed, (dict, list)):
+                logger.info("JSON rescue: parsed python-ish structured output from model.")
+                return parsed
+        except Exception:
+            return None
+    return None
+
+
+def _looks_structured_output(text: str) -> bool:
+    raw = str(text or "").strip()
+    return bool(
+        raw.startswith("{")
+        or raw.startswith("[")
+        or "```json" in raw.lower()
+        or re.search(r'"[A-Za-z_][^"]*"\s*:', raw)
+    )
+
+
+def _validate_response_format(parsed: dict | list, response_format: dict[str, Any] | None) -> dict | list | None:
+    if not isinstance(response_format, dict):
+        return parsed
+    if str(response_format.get("type", "") or "").strip().lower() != "json_schema":
+        return parsed
+
+    schema_wrapper = dict(response_format.get("json_schema", {}) or {})
+    schema = dict(schema_wrapper.get("schema", {}) or {})
+    if not schema:
+        return parsed
+
+    try:
+        validate(instance=parsed, schema=schema)
+        return parsed
+    except ValidationError as exc:
+        logger.warning("Structured output failed schema validation: %s", exc.message)
+        return None
 
 
 def run_json_inference(
@@ -229,28 +336,15 @@ def run_json_inference(
     max_tokens: int = 1500,
     temperature: float = 0.1,
     model_path: str | None = None,
+    response_format: dict[str, Any] | None = None,
 ) -> dict | list | None:
-    """
-    Chạy inference và parse kết quả thành JSON.
-    Model được hướng dẫn trả về JSON, hàm này trích xuất + parse.
-
-    Nếu model trả về text có chứa JSON block (```json ... ```),
-    hàm sẽ tự extract.
-
-    Args:
-        system_prompt: Vai trò / hướng dẫn (nên yêu cầu trả JSON)
-        user_prompt: Nội dung cần xử lý
-        max_tokens: Số token tối đa
-
-    Returns:
-        dict/list nếu parse thành công, None nếu thất bại
-    """
     parsed, _, _ = run_json_inference_meta(
         system_prompt,
         user_prompt,
         max_tokens=max_tokens,
         temperature=temperature,
         model_path=model_path,
+        response_format=response_format,
     )
     return parsed
 
@@ -261,250 +355,25 @@ def run_json_inference_meta(
     max_tokens: int = 1500,
     temperature: float = 0.1,
     model_path: str | None = None,
+    response_format: dict[str, Any] | None = None,
 ) -> tuple[dict | list | None, str, bool]:
-    """
-    Chạy inference dạng JSON nhưng trả thêm raw output và tín hiệu xem
-    model có cố gắng trả structured output hay không.
-
-    Returns:
-        (parsed_json_or_none, raw_output, looks_structured)
-    """
     raw = run_inference(
         system_prompt,
         user_prompt,
         max_tokens=max_tokens,
         temperature=temperature,
         model_path=model_path,
+        response_format=response_format,
     )
 
-    def _normalize_jsonish(text: str) -> str:
-        cleaned = str(text or "").strip()
-        cleaned = cleaned.replace("“", '"').replace("”", '"').replace("’", "'").replace("‘", "'")
-        cleaned = cleaned.replace("：", ":").replace("，", ",")
-        cleaned = cleaned.replace("\u00a0", " ")
-        cleaned = re.sub(r"^\s*json\s*", "", cleaned, flags=re.IGNORECASE)
-        cleaned = re.sub(r"//.*?$", "", cleaned, flags=re.MULTILINE)
-        cleaned = re.sub(r"#.*?$", "", cleaned, flags=re.MULTILINE)
-        cleaned = re.sub(r",(\s*[}\]])", r"\1", cleaned)
-        return cleaned
-
-    def _extract_balanced_json_blocks(text: str) -> list[str]:
-        blocks: list[str] = []
-        stack: list[str] = []
-        start_index: int | None = None
-        in_string = False
-        string_quote = ""
-        escaped = False
-
-        for index, char in enumerate(text):
-            if in_string:
-                if escaped:
-                    escaped = False
-                elif char == "\\":
-                    escaped = True
-                elif char == string_quote:
-                    in_string = False
-                continue
-
-            if char in {'"', "'"}:
-                in_string = True
-                string_quote = char
-                continue
-
-            if char in "{[":
-                if not stack:
-                    start_index = index
-                stack.append("}" if char == "{" else "]")
-                continue
-
-            if char in "}]":
-                if not stack or char != stack[-1]:
-                    continue
-                stack.pop()
-                if not stack and start_index is not None:
-                    blocks.append(_normalize_jsonish(text[start_index:index + 1]))
-                    start_index = None
-
-        return blocks
-
-    def _quote_unquoted_keys(text: str) -> str:
-        return re.sub(
-            r'([{\[,]\s*)([A-Za-z_][A-Za-z0-9_\- ]*)(\s*:)',
-            lambda match: f'{match.group(1)}"{match.group(2).strip()}"{match.group(3)}',
-            text,
-        )
-
-    def _json_rescue_variants(text: str) -> list[str]:
-        normalized = _normalize_jsonish(text)
-        variants = [normalized]
-        quoted_keys = _quote_unquoted_keys(normalized)
-        if quoted_keys != normalized:
-            variants.append(quoted_keys)
-        if "'" in normalized:
-            variants.append(quoted_keys.replace("'", '"'))
-        deduped: list[str] = []
-        seen: set[str] = set()
-        for item in variants:
-            if item and item not in seen:
-                seen.add(item)
-                deduped.append(item)
-        return deduped
-
-    def _extract_json_candidates(text: str) -> list[str]:
-        cleaned = _normalize_jsonish(text)
-        candidates: list[str] = [cleaned]
-
-        json_match = re.search(r"```(?:json)?\s*\n?(.*?)\n?```", cleaned, re.DOTALL)
-        if json_match:
-            candidates.append(_normalize_jsonish(json_match.group(1)))
-
-        for pattern in [r"\{.*\}", r"\[.*\]"]:
-            match = re.search(pattern, cleaned, re.DOTALL)
-            if match:
-                candidates.append(_normalize_jsonish(match.group(0)))
-
-        candidates.extend(_extract_balanced_json_blocks(cleaned))
-
-        seen: set[str] = set()
-        unique_candidates: list[str] = []
-        for item in candidates:
-            if item and item not in seen:
-                seen.add(item)
-                unique_candidates.append(item)
-        return unique_candidates
-
-    def _parse_pythonish_json(text: str):
-        pythonish = re.sub(r"\btrue\b", "True", text, flags=re.IGNORECASE)
-        pythonish = re.sub(r"\bfalse\b", "False", pythonish, flags=re.IGNORECASE)
-        pythonish = re.sub(r"\bnull\b", "None", pythonish, flags=re.IGNORECASE)
-        try:
-            parsed = ast.literal_eval(pythonish)
-            if isinstance(parsed, (dict, list)):
-                return parsed
-        except Exception:
-            return None
-        return None
-
-    def _parse_line_based_object(text: str) -> dict | None:
-        expected_anchor_keys = {
-            "primary_type",
-            "analysis_tier",
-            "decision",
-            "groundedness_score",
-            "freshness_score",
-            "operator_value_score",
-            "c1_score",
-            "c2_score",
-            "c3_score",
-            "summary_vi",
-            "editorial_angle",
-            "rationale",
-            "tags",
-            "relevance_level",
-        }
-        parsed: dict[str, object] = {}
-
-        def normalize_key_name(key: str) -> str:
-            key = re.sub(r"[^A-Za-z0-9_\- ]+", "", str(key or "").strip())
-            key = key.replace("-", "_")
-            key = re.sub(r"\s+", "_", key)
-            return key.lower().strip("_")
-
-        def normalize_scalar(value: str):
-            cleaned = str(value or "").strip().rstrip(",;")
-            cleaned = cleaned.strip("`")
-            if not cleaned:
-                return ""
-            if cleaned[0] == cleaned[-1] and cleaned[0] in {"'", '"'}:
-                return cleaned[1:-1].strip()
-            if re.fullmatch(r"-?\d+", cleaned):
-                try:
-                    return int(cleaned)
-                except ValueError:
-                    return cleaned
-            if re.fullmatch(r"-?\d+\.\d+", cleaned):
-                try:
-                    return float(cleaned)
-                except ValueError:
-                    return cleaned
-            lowered = cleaned.lower()
-            if lowered == "true":
-                return True
-            if lowered == "false":
-                return False
-            if lowered in {"null", "none"}:
-                return None
-            return cleaned
-
-        current_key = ""
-        for raw_line in str(text or "").splitlines():
-            line = raw_line.strip()
-            if not line:
-                continue
-            match = re.match(r'^(?:[-*]\s*)?["\']?([A-Za-z_][A-Za-z0-9_\- ]*)["\']?\s*:\s*(.+?)\s*$', line)
-            if match:
-                key = normalize_key_name(match.group(1))
-                value = match.group(2).strip()
-                current_key = key
-                if value.startswith("[") and value.endswith("]"):
-                    rescued = None
-                    for variant in _json_rescue_variants(value):
-                        try:
-                            rescued = json.loads(variant)
-                            break
-                        except json.JSONDecodeError:
-                            rescued = _parse_pythonish_json(variant)
-                            if rescued is not None:
-                                break
-                    if isinstance(rescued, list):
-                        parsed[key] = rescued
-                    else:
-                        parsed[key] = [item.strip() for item in value.strip("[]").split(",") if item.strip()]
-                else:
-                    parsed[key] = normalize_scalar(value)
-                continue
-
-            if current_key and isinstance(parsed.get(current_key), str):
-                parsed[current_key] = f"{parsed[current_key]} {line}".strip()
-
-        if len(parsed) < 2:
-            return None
-        if not (set(parsed.keys()) & expected_anchor_keys):
-            return None
-        return parsed
-
-    def _looks_structured_output(text: str) -> bool:
-        cleaned = _normalize_jsonish(text)
-        if not cleaned:
-            return False
-        if re.search(r"```(?:json)?", cleaned, re.IGNORECASE):
-            return True
-        if cleaned.startswith("{") or cleaned.startswith("["):
-            return True
-        if _extract_balanced_json_blocks(cleaned):
-            return True
-        if re.search(r'"[A-Za-z_][^"]*"\s*:', cleaned):
-            return True
-        if re.search(r"(^|\n)\s*[A-Za-z_][A-Za-z0-9_\- ]+\s*:\s*", cleaned):
-            return True
-        return False
-
-    for candidate in _extract_json_candidates(raw):
-        for variant in _json_rescue_variants(candidate):
-            try:
-                return json.loads(variant), raw, True
-            except json.JSONDecodeError:
-                parsed = _parse_pythonish_json(variant)
-                if parsed is not None:
-                    logger.info("🛟 JSON rescue: parsed python-ish structured output from model.")
-                    return parsed, raw, True
-
-    line_based = _parse_line_based_object(raw)
-    if isinstance(line_based, dict):
-        logger.info("🛟 JSON rescue: parsed line-based structured output from model.")
-        return line_based, raw, True
+    candidate = _extract_json_payload(raw)
+    parsed = _parse_json_candidate(candidate)
+    if parsed is not None:
+        validated = _validate_response_format(parsed, response_format)
+        if validated is not None:
+            return validated, raw, True
 
     looks_structured = _looks_structured_output(raw)
-    logger.warning("Không thể parse JSON từ model output (%d chars)", len(raw))
+    logger.warning("Could not parse JSON from model output (%d chars)", len(raw))
     logger.debug("Raw output: %s", raw[:500])
     return None, raw, looks_structured
