@@ -23,6 +23,15 @@ from xai_grok import (
 
 logger = logging.getLogger(__name__)
 
+BAD_PHRASES = [
+    "tín hiệu sơ bộ",
+    "chưa vượt trội so với",
+    "chưa vượt qua được",
+    "chỉ ở mức tín hiệu",
+    "chỉ cung cấp tín hiệu",
+    "chỉ mang tính tín hiệu",
+]
+
 
 def _dynamic_per_type_limit(*article_groups: list[dict[str, Any]]) -> int:
     lane_counts: dict[str, int] = {}
@@ -41,6 +50,21 @@ def _prefix_experiment_messages(messages: list[str], header: str) -> list[str]:
     prefixed = list(messages)
     prefixed[0] = f"{header}\n\n{prefixed[0]}".strip()
     return prefixed
+
+
+def _telegram_eligible_articles(articles: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    eligible: list[dict[str, Any]] = []
+    skipped = 0
+    for article in articles:
+        note_summary_vi = str(article.get("note_summary_vi", "") or "").strip().lower()
+        if note_summary_vi and any(phrase in note_summary_vi for phrase in BAD_PHRASES):
+            skipped += 1
+            continue
+        eligible.append(article)
+
+    if skipped:
+        logger.info("🧹 Skipped %d articles from Telegram output due to internal scoring language.", skipped)
+    return eligible
 
 
 def _apply_grok_news_copy(
@@ -93,7 +117,7 @@ def summarize_vn_node(state: dict[str, Any]) -> dict[str, Any]:
     """
     # Chỉ dùng các bài đã qua delivery judge để dựng brief.
     # Nếu không có candidate nào, hệ sẽ fallback sang history thay vì lôi toàn bộ final_articles lên Telegram.
-    briefing_articles = list(state.get("telegram_candidates", []) or [])
+    briefing_articles = _telegram_eligible_articles(list(state.get("telegram_candidates", []) or []))
     notion_pages = state.get("notion_pages", [])
     is_publish_run = str(state.get("run_mode", "preview") or "preview").strip().lower() == "publish"
     history_articles = get_history(
