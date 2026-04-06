@@ -210,7 +210,10 @@ def _project_fit_bucket(article: dict[str, Any]) -> str:
     return "low"
 
 
-def _main_brief_threshold(_article: dict[str, Any]) -> tuple[int, set[str]]:
+def _main_brief_threshold(article: dict[str, Any]) -> tuple[int, set[str]]:
+    source_kind = str(article.get("source_kind", "")).lower()
+    if source_kind == "official":
+        return 35, {"high", "medium", "low"}
     return 45, {"high", "medium"}
 
 
