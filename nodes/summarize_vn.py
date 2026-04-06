@@ -56,8 +56,17 @@ def _telegram_eligible_articles(articles: list[dict[str, Any]]) -> list[dict[str
     eligible: list[dict[str, Any]] = []
     skipped = 0
     for article in articles:
-        note_summary_vi = str(article.get("note_summary_vi", "") or "").strip().lower()
+        summary = str(article.get("note_summary_vi", "") or "").strip()
+        note_summary_vi = summary.lower()
         if note_summary_vi and any(phrase in note_summary_vi for phrase in BAD_PHRASES):
+            skipped += 1
+            continue
+        if len(summary) < 80:
+            skipped += 1
+            continue
+        if summary.count("(") >= 2 and any(
+            marker in summary for marker in ["API", "Hacker News", "GitHub", "theo bài viết"]
+        ):
             skipped += 1
             continue
         eligible.append(article)
