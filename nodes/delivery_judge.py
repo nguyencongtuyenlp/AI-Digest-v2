@@ -266,7 +266,7 @@ def _deterministic_delivery_assessment(article: dict[str, Any]) -> dict[str, Any
             "skip_reason": "speculation",
         }
 
-    if score < 40 or (confidence == "low" and not content_available):
+    if score < 35:
         return {
             "groundedness_score": groundedness_score,
             "freshness_score": freshness_score,
