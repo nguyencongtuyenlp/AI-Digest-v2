@@ -21,9 +21,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from runtime_presets import apply_runtime_preset
-from mlx_runner import clear_runtime_mlx_model_path, set_runtime_mlx_model_path
-from run_health import collect_source_health, notify_source_health_if_needed
+from digest.runtime.runtime_presets import apply_runtime_preset
+from digest.runtime.mlx_runner import clear_runtime_mlx_model_path, set_runtime_mlx_model_path
+from digest.runtime.run_health import collect_source_health, notify_source_health_if_needed
 
 logger = logging.getLogger(__name__)
 
@@ -99,7 +99,7 @@ def build_initial_state(
 @lru_cache(maxsize=1)
 def _get_pipeline_graph():
     # Compile graph một lần rồi tái sử dụng cho các run sau để giảm thời gian khởi động.
-    from graph import build_graph
+    from digest.workflow.graph import build_graph
 
     return build_graph()
 
@@ -193,11 +193,11 @@ def _publish_selected_outputs_from_preview(
     """
     with _pipeline_run_lock():
         start = datetime.now(timezone.utc)
-        from nodes.generate_run_report import generate_run_report_node
-        from nodes.quality_gate import quality_gate_node
-        from nodes.save_notion import save_notion_node
-        from nodes.send_telegram import send_telegram_node
-        from nodes.summarize_vn import summarize_vn_node
+        from digest.workflow.nodes.generate_run_report import generate_run_report_node
+        from digest.workflow.nodes.quality_gate import quality_gate_node
+        from digest.workflow.nodes.save_notion import save_notion_node
+        from digest.workflow.nodes.send_telegram import send_telegram_node
+        from digest.workflow.nodes.summarize_vn import summarize_vn_node
 
         # Clone nông để tái dùng đúng dữ liệu preview đã duyệt, nhưng vẫn tránh sửa trực tiếp state cũ.
         state = {

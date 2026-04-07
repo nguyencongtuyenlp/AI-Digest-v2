@@ -1,4 +1,4 @@
-"""Compatibility facade for the workflow graph."""
+"""Workflow graph and node package."""
 
 from digest.workflow.graph import DigestState, build_graph
 

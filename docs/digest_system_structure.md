@@ -1,632 +1,404 @@
 # Cấu Trúc Hệ Thống Daily Digest Agent
 
-Tài liệu này mô tả `cấu trúc kỹ thuật hiện tại` của dự án Daily Digest Agent, bám theo code đang có trong repo. Nó dùng để giải thích hệ thống được tổ chức như thế nào, module nào chịu trách nhiệm gì, dữ liệu đi qua đâu và các điểm publish/review nằm ở đâu.
+Tài liệu này mô tả `kiến trúc kỹ thuật hiện tại` của dự án Daily Digest Agent, bám theo code đang có trong repo. Nó tập trung vào những gì hệ thống đang thực sự chạy hôm nay: entry points nào kích hoạt run, pipeline hiện tại trong `digest/workflow/graph.py` đi theo nhánh nào, state và artefact được ghi ra đâu, và preview/publish vận hành ra sao.
 
-## 1. Mục tiêu hệ thống
+## 1. Bộ sơ đồ chuẩn của hệ thống
 
-Daily Digest Agent là một hệ thống `local-first AI editorial pipeline` chạy trên Apple Silicon để:
+Mermaid source of truth hiện nằm ở:
 
-- thu thập tin AI/Tech từ nhiều nguồn
-- lọc nhiễu và chuẩn hóa dữ liệu nguồn
-- chấm điểm theo góc nhìn startup/operator
-- tạo phân tích và summary tiếng Việt
-- lưu kiến thức vào Notion
-- gửi digest ra Telegram theo nhiều lane
-- tích lũy feedback và lịch sử chất lượng nguồn để cải thiện dần
+- [docs/architecture_diagrams.md](./architecture_diagrams.md)
 
-## 2. Góc nhìn kiến trúc cấp cao
+Ảnh xuất sẵn để dùng trong slide, docs ngoài repo hoặc review nhanh:
 
-```mermaid
-flowchart LR
-  subgraph Inputs["Input Layer"]
-    I1["RSS / Official Blogs"]
-    I2["GitHub repos / orgs / queries"]
-    I3["Watchlist / DDG / HN / Reddit / Telegram"]
-    I4["Facebook / Social signals"]
-    I5["Telegram feedback"]
-  end
+- [docs/assets/system_overview.svg](./assets/system_overview.svg)
+- [docs/assets/execution_flow.svg](./assets/execution_flow.svg)
 
-  subgraph Orchestration["Orchestration Layer"]
-    O1["main.py / ui_server.py"]
-    O2["pipeline_runner.py"]
-    O3["graph.py (LangGraph StateGraph)"]
-  end
+### 1.1. System Overview
 
-  subgraph Processing["Processing Layer"]
-    P1["Gather + Normalize + Dedup"]
-    P2["Feedback + Score + Analysis"]
-    P3["Delivery Judge + Summary + Quality Gate"]
-  end
+![System overview](./assets/system_overview.svg)
 
-  subgraph Storage["Storage Layer"]
-    S1["SQLite database.db"]
-    S2["Chroma memory"]
-    S3["Notion Database"]
-    S4["Reports / Snapshots / Archive"]
-  end
+### 1.2. Execution Flow
 
-  subgraph Delivery["Delivery Layer"]
-    D1["UI Preview"]
-    D2["Telegram Main"]
-    D3["Telegram GitHub Topic"]
-  end
+![Execution flow](./assets/execution_flow.svg)
 
-  Inputs --> Orchestration
-  Orchestration --> Processing
-  Processing --> Storage
-  Processing --> Delivery
-  Delivery --> Storage
-  Storage -.-> Processing
-```
+## 2. Kiến trúc cấp cao
 
-## 3. Các lớp chính của hệ thống
+Hệ thống hiện được tổ chức thành 6 lớp chính:
 
-### 3.1. Entry Points
+- `Input layer`: RSS, official blogs, GitHub signals, watchlist, DDG, Hacker News, Reddit, Telegram channels, Facebook/social signals, và feedback từ Telegram.
+- `Entry points`: `main.py` cho publish run, `ui_server.py` cho preview/approve, `scripts/launchd.plist` cho scheduler.
+- `Orchestration layer`: `pipeline_runner.py` lo state đầu vào, runtime preset, model override, source health, process lock và reuse compiled graph.
+- `Workflow engine`: `digest/workflow/graph.py` định nghĩa `LangGraph StateGraph` và node order hiện tại.
+- `Processing layer`: gather, normalize, dedup, feedback sync, rule prefilter, batch classify, batch deep/quick compose, merge, delivery judge, save, summarize, quality gate.
+- `Storage + review surfaces`: SQLite, vector memory, Notion, run report, temporal snapshots, UI preview, Telegram main brief.
 
-Hệ thống có 3 điểm vào chính:
+Support modules không còn nằm phẳng ở root. Chúng đã được gom vào package `digest/` theo 4 nhóm:
 
-- `main.py`
-  Chạy production flow từ terminal hoặc scheduler.
-- `ui_server.py`
-  Chạy local control panel để preview và approve.
-- `github_agent_brief.py`
-  Chạy preview hoặc publish chỉ còn xoay quanh main brief.
+- `digest/editorial/`: formatting, guardrails, feedback, executive intelligence
+- `digest/runtime/`: inference, health, presets, snapshots, artifact retention, Grok helpers
+- `digest/sources/`: registry, policy, runtime source config, source history
+- `digest/storage/`: SQLite + vector memory
 
-Ngoài ra còn có:
+Điểm quan trọng cần chốt theo code hiện tại:
 
-- `launchd.plist`
-  Scheduler để chạy hằng ngày lúc `08:00`.
-- `pipeline_runner.py`
-  Lõi điều phối dùng chung giữa CLI và UI.
+- `delivery chính thức` hiện là main Telegram brief, không còn GitHub lane hay Facebook lane như một đường publish độc lập trong flow chính.
+- `preview` chạy cùng backbone logic với `publish`, nhưng tắt các cờ ghi/publish ở đầu ra.
+- `Approve Preview` không regather hay rescore lại từ đầu; nó publish từ đúng `preview_state` đã review.
 
-### 3.2. Orchestration Layer
+## 3. Entry points và orchestration
 
-Đây là lớp điều phối vòng đời một run.
+### 3.1. `main.py`
 
-#### `main.py`
-
-Nhiệm vụ:
+Vai trò:
 
 - load `.env`
 - khởi tạo logging
 - đọc `DIGEST_RUN_PROFILE`
 - gọi `run_pipeline(run_mode="publish")`
-- in summary và log thống kê cuối run
+- log summary cuối run
 
-#### `ui_server.py`
+`main.py` là đường vào production đơn giản nhất cho terminal hoặc scheduler.
 
-Nhiệm vụ:
+### 3.2. `ui_server.py`
 
-- tạo local web UI
-- cho chạy `preview`
-- hiển thị preview articles và Telegram output
-- cho phép `Approve Preview`
-- publish đúng state đã preview, không regather lại
+Vai trò:
 
-Điểm quan trọng về mặt hệ thống:
+- chạy local control panel
+- cho phép `Run Preview`
+- hiển thị `workspace_articles`, `telegram_messages`, `run report`
+- giữ `preview_state` trong bộ nhớ để review
+- cho phép `Approve Preview` hoặc `Publish Notion Only`
 
-- UI không tự quyết logic editorial
-- UI là lớp điều khiển và review
-- pipeline thật vẫn nằm ở `pipeline_runner.py` + `graph.py`
+Điểm cần nhớ:
 
-#### `pipeline_runner.py`
+- UI không quyết định editorial logic.
+- UI chỉ là lớp điều khiển và review quanh `pipeline_runner.py`.
+- Preview phản chiếu cùng logic pipeline hiện tại, không phải một flow mock riêng.
 
-Đây là lớp orchestration quan trọng nhất:
+### 3.3. `scripts/launchd.plist`
 
-- build initial state
-- áp runtime preset theo profile
-- khóa liên tiến trình để chống chạy chồng
-- compile / reuse graph
-- chạy `preview` hoặc `publish`
-- hỗ trợ publish trực tiếp từ preview state
+Vai trò:
 
-Các cơ chế kỹ thuật đáng chú ý:
+- kích hoạt run định kỳ trên macOS
+- đẩy execution về `main.py`
 
-- `_pipeline_run_lock()`
-  Khóa bằng file lock để UI, CLI và launchd không dẫm nhau.
-- `_runtime_model_override()`
-  Override model MLX theo profile/runtime nếu cần.
+Scheduler này chỉ là trigger; orchestration thật vẫn nằm trong `pipeline_runner.py`.
+
+### 3.4. `pipeline_runner.py`
+
+Đây là lớp điều phối trung tâm của mỗi run. Những trách nhiệm chính:
+
 - `build_initial_state()`
-  Tạo state chuẩn cho graph.
+  Chuẩn hóa `run_mode`, `run_profile`, `publish_notion`, `publish_telegram`, `persist_local`, `runtime_config`.
+- `apply_runtime_preset()`
+  Áp preset như `publish`, `fast`, `grok_smart` nhưng vẫn tôn trọng override runtime.
+- `_runtime_model_override()`
+  Cho phép một run tạm thời đổi model MLX.
+- `_pipeline_run_lock()`
+  Dùng file lock để `launchd`, CLI và UI không chạy chồng pipeline.
+- `collect_source_health()` và `notify_source_health_if_needed()`
+  Gắn source health vào run trước khi graph được invoke.
+- `_get_pipeline_graph()`
+  Compile graph một lần rồi reuse cho các run sau.
 - `publish_from_preview_state()`
-  Publish từ đúng batch đã review.
+  Publish lại đoạn cuối từ đúng batch preview đã duyệt, không regather/rescore.
 
-### 3.3. Workflow Engine
+### 3.5. `digest/workflow/graph.py`
 
-`graph.py` định nghĩa `LangGraph StateGraph` cho toàn bộ pipeline.
-
-State trung tâm là `DigestState`, chứa các nhóm dữ liệu:
+`digest/workflow/graph.py` định nghĩa `DigestState` và toàn bộ graph hiện tại. Root `graph.py` chỉ còn là compatibility facade để giữ các entry points cũ không bị gãy. State trung tâm chứa các nhóm dữ liệu sau:
 
 - cờ run: `run_mode`, `run_profile`, `publish_notion`, `publish_telegram`, `persist_local`
-- dữ liệu thu thập: `raw_articles`
-- dữ liệu sau làm sạch: `new_articles`
-- feedback context
-- kết quả scoring: `scored_articles`, `top_articles`, `low_score_articles`
-- dữ liệu delivery: `final_articles`, `telegram_candidates`
-- output publish: `notion_pages`, `telegram_messages`
-- artefact quản trị: `run_report_path`, `run_health`, `publish_ready`, `snapshot paths`
-
-Điểm rẽ nhánh chính:
-
-- sau `classify_and_score`
-- nếu có `top_articles` thì vào `deep_analysis`
-- nếu không thì đi thẳng tới `compose_note_summary`
-
-## 4. Pipeline xử lý chi tiết
-
-### 4.1. Gather Layer
-
-File chính:
-
-- `nodes/gather_news.py`
-- `source_registry.py`
-- `source_policy.py`
-- `source_runtime.py`
-- `source_adapters/`
-
-Nhiệm vụ:
-
-- lấy dữ liệu từ nhiều nguồn
-- gắn metadata acquisition/source kind
-- bổ sung social/community signals
-- ghi snapshot sau gather nếu bật
-
-Các nhóm nguồn hiện có:
-
-- `Official / RSS`
-  OpenAI, Anthropic, Google, DeepMind, Meta, Hugging Face, Microsoft, Nvidia, AWS, Databricks, Cloudflare
-- `Strong media`
-  TechCrunch, The Verge, Ars Technica, MIT News
-- `Vietnam media`
-  GenK
-- `GitHub signals`
-  repo, org, release, search query
-- `Community sources`
-  Reddit, Hacker News, Telegram channels
-- `Search supplements`
-  DuckDuckGo query tiếng Anh và tiếng Việt
-- `Watchlist runtime`
-  file + env-based seeds
-- `Facebook auto / social signals`
-  target file, discovery cache, scraping adapter
-- `Grok scout / X scout`
-  lớp tăng cường nếu bật xAI
-
-Các adapter đáng chú ý:
-
-- `source_adapters/github_adapter.py`
-- `source_adapters/facebook_adapter.py`
-- `source_adapters/grok_scout_adapter.py`
-
-### 4.2. Source Normalization Layer
-
-File chính:
-
-- `nodes/normalize_source.py`
-
-Nhiệm vụ:
-
-- trích `source_domain`
-- phân loại `source_kind`
-- chuẩn hóa `published_at`
-- gắn `source_tier`
-- loại bớt non-news candidate / off-topic signals ở mức nguồn
-
-Tại sao lớp này quan trọng:
-
-- scoring freshness phụ thuộc mạnh vào `published_at`
-- delivery judge cần biết nguồn có đáng tin không
-- report cần thống kê theo domain/source kind
-
-### 4.3. Dedup + Memory Layer
-
-File chính:
-
-- `nodes/deduplicate.py`
-- `db.py`
-- `memory.py`
-
-Dedup hiện chạy theo 2 tầng:
-
-1. `SQLite URL hash`
-   Loại các URL đã từng lưu.
-2. `Vector memory recall`
-   Tìm bài tương tự theo nội dung và gắn `related_past`.
-
-Ngoài chuyện loại trùng, lớp này còn giúp:
-
-- tránh lặp bản tin cũ
-- giữ bối cảnh lịch sử cho phân tích sâu
-- phát hiện bài mới nhưng thuộc cùng chủ đề với bài đã có
-
-### 4.4. Feedback Layer
-
-File chính:
-
-- `nodes/collect_feedback.py`
-- `feedback_loop.py`
-- `db.py`
-
-Nguồn feedback hiện là Telegram Bot API.
-
-Hệ thống nhận các kiểu phản hồi như:
-
-- `cũ`
-- `nguồn yếu`
-- `không liên quan`
-- `đáng đọc`
-- `đào sâu hơn`
-- `ưu tiên founder`
-- `không nên lên brief`
-- `nên lên brief`
-- `sai loại ...`
-
-Feedback được dùng để tạo:
-
-- `recent_feedback`
-- `feedback_summary_text`
-- `feedback_label_counts`
-
-Điều này làm cho hệ thống có `human-in-the-loop memory`, không chỉ chạy theo rule tĩnh.
-
-### 4.5. Editorial Scoring Layer
-
-File chính:
-
-- `nodes/classify_and_score.py`
-- `editorial_guardrails.py`
-- `mlx_runner.py`
-
-Mục tiêu:
-
-- classify 6 nhóm tin
-- chấm điểm theo độ quan trọng với startup/operator
-- quyết định bài nào cần deep analysis
-
-3 nhóm tin hiện dùng:
-
-- `Product`
-- `Society & Culture`
-- `Practical`
-
-Kết quả đầu ra chính:
-
-- `scored_articles`
-- `top_articles`
-- `low_score_articles`
-
-Hệ cũng có thể bật `Grok prefilter` để rerank shortlist trước lớp scoring sâu hơn.
-
-### 4.6. Deep Analysis Layer
-
-File chính:
-
-- `nodes/deep_analysis.py`
-- `nodes/recommend_idea.py`
-- `nodes/compose_note_summary.py`
-
-Đây là lớp biến article thành editorial asset có thể dùng được.
-
-#### `deep_analysis.py`
-
-Chỉ chạy cho bài top score.
-
-Nhiệm vụ:
-
-- tìm thêm phản ứng cộng đồng bằng DDG
-- đọc `related_past` từ memory
-- viết `deep_analysis` / `content_page_md`
-- buộc giữ các section evidence như fact anchors, inference, unknowns
-
-#### `recommend_idea.py`
-
-Tạo `recommend_idea` cho startup/product context của team.
-
-#### `compose_note_summary.py`
-
-Nén mỗi bài thành `note_summary_vi` để dùng cho:
-
-- Notion property
-- Telegram preview
-- delivery judge context
-
-### 4.7. Delivery Decision Layer
-
-File chính:
-
-- `nodes/delivery_judge.py`
-- `digest_formatter.py`
-- `xai_grok.py`
-
-Đây là lớp quyết định `bài nào xứng đáng được gửi`.
-
-Hệ thống hiện có 1 lane đầu ra:
-
-- `telegram_candidates`
-  main brief
-  repo/release/tool lane riêng
-
-Logic judge gồm:
-
-- deterministic heuristics
-- freshness / stale check
-- confidence / source tier check
-- duplicate event suppression
-- lane lock cho GitHub/Facebook
-- optional Grok reranker/final editor
-
-Đây là một lớp rất quan trọng, vì nó là ranh giới giữa:
-
-- `article tốt để lưu`
-- và `article đủ tốt để phát cho người dùng`
-
-### 4.8. Persistence Layer
-
-File chính:
-
-- `nodes/save_notion.py`
-- `db.py`
-- `memory.py`
-- `source_history.py`
-
-#### SQLite (`database.db`)
-
-Đang lưu các nhóm dữ liệu:
-
-- `articles`
-- `feedback_entries`
-- `app_meta`
-- `source_history`
-
-Vai trò:
-
-- dedup URL
-- lưu article history
-- lưu feedback history
-- lưu offsets/meta
-- lưu thống kê chất lượng nguồn theo thời gian
-
-#### Chroma / vector memory
-
-Vai trò:
-
-- recall bài tương tự
-- hỗ trợ historical context cho deep analysis
-
-#### Notion
-
-Mỗi article được lưu thành `1 page`.
-
-Thông tin chính hiện được map gồm:
-
-- title
-- type
-- url
-- score
-- summary
-- recommend
-- tags
-- relevance/project fit
-- analysis
-- delivery decision
-- source metadata
-- freshness/confidence/source tier
-
-#### Source History
-
-Hệ thống học dần:
-
-- nguồn nào hay ra bài mạnh
-- nguồn nào nhiều stale/speculation/promo/weak
-- bonus/penalty nên áp cho nguồn trong các run sau
-
-### 4.9. Summary + Safety Layer
-
-File chính:
-
-- `nodes/summarize_vn.py`
-- `nodes/quality_gate.py`
-- `editorial_guardrails.py`
-
-#### `summarize_vn.py`
-
-Nhiệm vụ:
-
-- dựng Telegram messages từ candidate đã qua judge
-- giữ main brief gọn, đủ dày và không bị lane phụ làm loãng
-- có thể dùng history fallback khi batch mỏng
-- optional Grok news copy để polish blurb
-
-#### `quality_gate.py`
-
-Nhiệm vụ:
-
-- validate summary/messages trước khi gửi
-- nếu có warning hoặc output rỗng thì fallback sang `safe digest`
-
-Ý nghĩa:
-
-- tránh hallucination hoặc summary lệch bài đã chọn
-- đảm bảo “validate cùng tập bài sẽ gửi”
-
-### 4.10. Delivery Layer
-
-File chính:
-
-- `nodes/send_telegram.py`
-
-Đầu ra:
-
-- main thread qua `TELEGRAM_THREAD_ID`
-
-Đặc điểm:
-
-- dùng Telegram Bot API
-- hỗ trợ chia nhỏ message > 4096 chars
-- preview mode sẽ không publish
-
-### 4.11. Reporting + Artifact Layer
-
-File chính:
-
-- `nodes/generate_run_report.py`
-- `run_health.py`
-- `temporal_snapshots.py`
-- `artifact_retention.py`
-
-#### Run report
-
-Tạo báo cáo markdown sau mỗi run với các nội dung:
-
-- source mix
-- scored/type/tag breakdown
-- candidate breakdown theo lane
-- delivery skip reasons
-- feedback loop summary
-- source history signals
-- run health
-- snapshot paths
-
-#### Run health
-
-Đánh giá batch theo:
-
-- `green`
-- `yellow`
-- `red`
-
-và quyết định `publish_ready`.
-
-#### Temporal snapshots
-
-Lưu JSON snapshot ổn định sau:
-
-- gather
-- scoring
-
-để debug batch mà không cần mò log.
-
-#### Artifact retention
-
-Tự archive:
-
-- reports cũ
-- snapshots cũ
-- checkpoints
-- debug logs quá hạn
-
-Mục tiêu là repo vẫn gọn nhưng còn khả năng audit.
-
-## 5. Luồng dữ liệu thực tế
-
-```mermaid
-flowchart TB
-  A["Sources / Seeds / Social signals"] --> B["raw_articles"]
-  B --> C["normalize_source"]
-  C --> D["new_articles"]
-  D --> E["feedback context"]
-  E --> F["scored_articles"]
-  F --> G["top_articles / low_score_articles"]
-  G --> H["final_articles"]
-  H --> I["delivery candidates by lane"]
-  I --> J["notion_pages + telegram_messages"]
-  J --> K["quality gate"]
-  K --> L["telegram delivery"]
-  L --> M["run report / source history / snapshots"]
-```
-
-Các object dữ liệu quan trọng nhất trong state:
-
-- `raw_articles`
-  dữ liệu ngay sau gather
-- `new_articles`
-  dữ liệu sau normalize và dedup
-- `scored_articles`
-  dữ liệu đã classify + score
-- `top_articles`
-  bài đủ mạnh để deep analysis
-- `final_articles`
-  bài đã có note summary
-- `telegram_candidates`
-  bài đủ chuẩn để lên main brief
-- `notion_pages`
-  output persistence
-- `telegram_messages`
-  output delivery
-
-## 6. Cấu trúc thư mục theo vai trò
+- nguồn và dữ liệu thô: `raw_articles`, `source_health`, `grok_scout_count`
+- dữ liệu sau làm sạch: `new_articles`, `filtered_articles`
+- feedback context: `recent_feedback`, `feedback_summary_text`, `feedback_preference_profile`
+- scoring và routing: `scored_articles`, `top_articles`, `low_score_articles`
+- dữ liệu delivery: `analyzed_articles`, `final_articles`, `telegram_candidates`
+- publish outputs: `notion_pages`, `topic_pages`, `telegram_messages`
+- artefacts quản trị: `run_report_path`, `run_health`, `publish_ready`, `gather_snapshot_path`, `scored_snapshot_path`
+
+## 4. Processing flow hiện tại trong workflow graph
+
+Thứ tự node hiện tại trong [digest/workflow/graph.py](../digest/workflow/graph.py):
 
 ```text
-daily-digest-agent/
-├── main.py                    # entry point publish
-├── ui_server.py               # UI preview / approve
-├── pipeline_runner.py         # orchestration layer
-├── graph.py                   # LangGraph workflow
-├── db.py                      # SQLite persistence
-├── memory.py                  # vector memory
-├── feedback_loop.py           # Telegram feedback ingestion
-├── source_catalog.py          # facade cho source layer
-├── source_registry.py         # seed sources / queries
-├── source_policy.py           # trust policy / blocklist
-├── source_runtime.py          # runtime seed loading
-├── source_history.py          # source quality memory
-├── runtime_presets.py         # profile overrides
-├── run_health.py              # publish readiness
-├── temporal_snapshots.py      # JSON batch snapshots
-├── artifact_retention.py      # archive artifacts cũ
-├── source_adapters/           # GitHub, Facebook, Grok scout adapters
-├── nodes/                     # từng bước LangGraph
-├── config/                    # env example, prompts, seeds, inbox
-├── docs/                      # tài liệu vận hành và kiến trúc
-└── launchd.plist              # macOS scheduler
+gather
+→ normalize_source
+→ deduplicate
+→ collect_feedback
+→ early_rule_filter
+→ batch_classify_and_score
+→ (batch_deep_process || batch_quick_compose)
+→ merge_processed_articles
+→ delivery_judge
+→ save_notion
+→ summarize_vn
+→ quality_gate
+→ send_telegram
+→ generate_run_report
+→ END
 ```
 
-## 7. Chế độ chạy hiện tại
+### 4.1. `gather`
 
-### Publish mode
+File chính:
 
-Mục tiêu:
+- `digest/workflow/nodes/gather_news.py`
+- `digest/sources/source_registry.py`
+- `digest/sources/source_policy.py`
+- `digest/sources/source_runtime.py`
+- `digest/sources/adapters/`
 
-- chạy thật
-- có thể lưu local
-- có thể lưu Notion
-- có thể gửi Telegram
+Nhiệm vụ:
 
-### Preview mode
+- thu thập bài từ nhiều nguồn
+- gắn metadata nguồn và acquisition
+- thêm các nguồn social/community khi được bật
+- ghi temporal snapshot sau gather nếu cấu hình cho phép
 
-Mục tiêu:
+### 4.2. `normalize_source`
 
-- chạy đủ reasoning để review
-- không publish ra ngoài
-- không pollute local persistence
+File chính:
 
-### Runtime profiles
+- `digest/workflow/nodes/normalize_source.py`
 
-- `publish`
-  cấu hình production chuẩn
-- `fast`
-  preview nhanh, ít nguồn chậm, deterministic note summary
-- `grok_smart`
-  mở rộng Grok cho judge/copy/source gap/social scout
+Nhiệm vụ:
 
-## 8. Các điểm mạnh hiện có của cấu trúc hệ thống
+- chuẩn hóa `source_domain`, `source_kind`, `published_at`
+- gắn `source_tier`
+- loại bớt candidate yếu ở mức metadata nguồn
 
-- Tách rõ `orchestration` và `node logic`
-- Có `preview -> approve` thay vì publish mù
-- Có `source history` và `feedback loop` để học dần
-- Có `health`, `report`, `snapshot` để quản trị chất lượng
-- Có `3 delivery lanes` thay vì trộn mọi thứ vào một brief
-- Có `lock` chống concurrent run
-- Có `artifact retention` để vận hành lâu dài
+### 4.3. `deduplicate`
 
-## 9. Các điểm cần lưu ý khi trình bày với sếp
+File chính:
 
-Nếu sếp hỏi “cấu trúc hệ thống này hiện gồm gì”, câu trả lời đúng với repo này là:
+- `digest/workflow/nodes/deduplicate.py`
+- `digest/storage/db.py`
+- `digest/storage/memory.py`
 
-- một lớp `source ingestion`
-- một lớp `editorial AI pipeline`
-- một lớp `storage + memory`
-- một lớp `review + governance`
-- một lớp `delivery`
+Nhiệm vụ:
 
-Nó không chỉ là cấu trúc thư mục, mà là cấu trúc `system components + data flow + operational controls`.
+- loại URL đã có trong SQLite history
+- recall bài tương tự từ vector memory
+- gắn `related_past` để downstream có historical context
+
+### 4.4. `collect_feedback`
+
+File chính:
+
+- `digest/workflow/nodes/collect_feedback.py`
+- `digest/editorial/feedback_loop.py`
+
+Nhiệm vụ:
+
+- sync feedback gần đây từ Telegram
+- xây `feedback_summary_text`, `feedback_label_counts`, `feedback_preference_profile`
+- đưa human review quay lại pipeline như context editorial
+
+### 4.5. `early_rule_filter`
+
+File chính:
+
+- `digest/workflow/nodes/early_rule_filter_node.py`
+
+Nhiệm vụ:
+
+- cắt sớm các bài rất yếu trước khi vào classify batch
+- loại duplicate title / editorial noise / off-scope items
+- rescue một phần bài nếu filtered set xuống quá thấp
+
+Node này giúp giảm số lần gọi MLX nhưng vẫn giữ breadth đủ để batch sau không bị quá hẹp.
+
+### 4.6. `batch_classify_and_score`
+
+File chính:
+
+- `digest/workflow/nodes/batch_classify_and_score_node.py`
+- `digest/workflow/nodes/classify_and_score.py`
+
+Nhiệm vụ:
+
+- batch classify nhiều bài trong một lần gọi MLX
+- chấm điểm, normalize type/tag, build score breakdown
+- tách `top_articles` và `low_score_articles`
+- ghi temporal snapshot sau scoring
+
+Đây là node thay thế flow classify đơn chiếc cũ bằng routing theo batch.
+
+### 4.7. `batch_deep_process`
+
+File chính:
+
+- `digest/workflow/nodes/batch_deep_process_node.py`
+- `digest/workflow/nodes/deep_analysis.py`
+- `digest/workflow/nodes/recommend_idea.py`
+- `digest/workflow/nodes/compose_note_summary.py`
+
+Nhiệm vụ:
+
+- xử lý `top_articles` theo chunk
+- dựng grounding và community reactions
+- batch ra `deep_analysis`, `recommend_idea`, `note_summary_vi`
+
+Về mặt kiến trúc, node này là wrapper batch cho lớp phân tích sâu cũ; repo vẫn còn các helper file riêng nhưng graph hiện tại gọi wrapper này.
+
+### 4.8. `batch_quick_compose`
+
+File chính:
+
+- `digest/workflow/nodes/batch_quick_compose_node.py`
+- `digest/workflow/nodes/compose_note_summary.py`
+
+Nhiệm vụ:
+
+- tạo `note_summary_vi` cho `low_score_articles`
+- có deterministic fallback trong `fast` mode
+
+### 4.9. `merge_processed_articles`
+
+File chính:
+
+- `digest/workflow/graph.py`
+
+Nhiệm vụ:
+
+- merge kết quả từ nhánh `batch_deep_process` và `batch_quick_compose`
+- loại duplicate
+- sort lại theo `total_score`
+- build `final_articles`
+
+Đây là điểm hợp nhất fan-out quan trọng nhất trong graph hiện tại.
+
+### 4.10. `delivery_judge`
+
+File chính:
+
+- `digest/workflow/nodes/delivery_judge.py`
+- `digest/editorial/digest_formatter.py`
+- `digest/runtime/xai_grok.py`
+
+Nhiệm vụ:
+
+- chọn bài nào đủ mạnh để vào `telegram_candidates`
+- áp heuristics về freshness, source quality, event duplication, founder lens
+- optionally dùng Grok cho shortlist cuối nếu được bật
+
+### 4.11. `save_notion`
+
+File chính:
+
+- `digest/workflow/nodes/save_notion.py`
+
+Nhiệm vụ:
+
+- tạo hoặc reuse page trong Notion
+- map article fields và editorial metadata sang schema lưu trữ
+
+### 4.12. `summarize_vn`
+
+File chính:
+
+- `digest/workflow/nodes/summarize_vn.py`
+
+Nhiệm vụ:
+
+- dựng `telegram_messages` từ `telegram_candidates`
+- chỉ render lane có bài thật trong main brief
+- fallback sang safe summary khi batch mỏng hoặc formatter không đủ dữ liệu
+
+### 4.13. `quality_gate`
+
+File chính:
+
+- `digest/workflow/nodes/quality_gate.py`
+- `digest/editorial/editorial_guardrails.py`
+
+Nhiệm vụ:
+
+- validate `telegram_messages` và `summary_vn`
+- thêm warning / fallback nếu output lệch hoặc quá yếu
+
+### 4.14. `send_telegram`
+
+File chính:
+
+- `digest/workflow/nodes/send_telegram.py`
+
+Nhiệm vụ:
+
+- gửi main Telegram brief qua Bot API
+- chia message dài thành nhiều chunk
+- tôn trọng `publish_telegram=False` trong preview mode
+
+### 4.15. `generate_run_report`
+
+File chính:
+
+- `digest/workflow/nodes/generate_run_report.py`
+- `digest/runtime/run_health.py`
+- `digest/runtime/temporal_snapshots.py`
+- `digest/runtime/artifact_retention.py`
+
+Nhiệm vụ:
+
+- xuất báo cáo markdown hậu kiểm
+- tính `run_health` và `publish_ready`
+- ghi/nhặt temporal snapshots
+- archive artefacts cũ theo retention rules
+
+## 5. State, storage và artefacts
+
+### 5.1. SQLite
+
+`database.db` hiện giữ các dữ liệu phục vụ vận hành:
+
+- article history để dedup
+- feedback history
+- app metadata / offsets
+- source history signals
+
+### 5.2. Vector memory
+
+`digest/storage/memory.py` phục vụ:
+
+- recall bài tương tự
+- historical grounding cho batch phân tích sâu
+
+### 5.3. Notion
+
+`save_notion.py` là persistence layer cho knowledge base phía người dùng. Mỗi article được map thành page với:
+
+- title, URL, score, type, tags
+- summary / analysis / recommendation
+- source metadata và delivery metadata
+
+### 5.4. Reports, snapshots, archive
+
+Repo hiện có một lớp artefact quản trị riêng:
+
+- run reports trong `reports/`
+- snapshots JSON cho gather/scoring
+- archive runtime trong `.runtime_archive/`
+- cleanup policy qua `digest/runtime/artifact_retention.py`
+
+## 6. Review và delivery model
+
+Flow review/publish hiện tại vận hành như sau:
+
+1. `ui_server.py` chạy `Run Preview`.
+2. `pipeline_runner.run_pipeline(run_mode="preview")` chạy cùng graph thật nhưng tắt publish/gạch SQLite output không cần thiết.
+3. UI giữ `preview_state`, `workspace_articles`, `telegram_messages`, `run report`.
+4. Người dùng review batch.
+5. `Approve Preview` gọi `publish_from_preview_state()`.
+6. Hệ chỉ rerun đoạn cuối cần publish: `save_notion -> summarize_vn -> quality_gate -> send_telegram -> generate_run_report`.
+
+Ý nghĩa kiến trúc:
+
+- preview và publish không bị drift logic
+- tránh tình trạng preview đẹp nhưng publish lại ra batch khác
+- review bám đúng batch đã duyệt
+
+## 7. Ghi chú để đọc repo đúng cách
+
+- Repo vẫn còn các helper như `deep_analysis.py`, `recommend_idea.py`, `compose_note_summary.py`, nhưng graph hiện tại route qua các batch wrapper tương ứng.
+- `README.md` và tài liệu này nên được coi là lớp mô tả chính thức; nếu có khác biệt, `digest/workflow/graph.py` và `pipeline_runner.py` là source of truth cuối cùng.
+- Khi cần cập nhật sơ đồ, sửa Mermaid trong [docs/architecture_diagrams.md](./architecture_diagrams.md) rồi chạy script export để đồng bộ `SVG`.

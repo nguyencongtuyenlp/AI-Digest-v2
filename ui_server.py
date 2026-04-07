@@ -30,7 +30,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from dotenv import load_dotenv
 
 from pipeline_runner import publish_from_preview_state, publish_notion_only_from_preview_state, run_pipeline
-from runtime_presets import apply_runtime_preset
+from digest.runtime.runtime_presets import apply_runtime_preset
 
 env_path = PROJECT_ROOT / "config" / ".env"
 if env_path.exists():

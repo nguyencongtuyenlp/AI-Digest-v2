@@ -80,7 +80,7 @@ Cách lấy:
 - Sau đó chạy app/repo một lần để hoàn tất login và sinh file `digest_session.session`
 
 Verify nhanh:
-- `source_health_check.py` sẽ không còn báo `telethon_session` là missing/dead.
+- `scripts/source_health_check.py` sẽ không còn báo `telethon_session` là missing/dead.
 
 ## 2. Optional nhưng rất nên có
 
@@ -157,7 +157,7 @@ Env / file:
 - `FACEBOOK_STORAGE_STATE_FILE`
 
 Link trực tiếp:
-- Script local trong repo: [facebook_login_setup.py](/Users/quangdang/Projects/AI-digest-v2/facebook_login_setup.py)
+- Script local trong repo: [scripts/facebook_login_setup.py](/Users/quangdang/Projects/AI-digest-v2/scripts/facebook_login_setup.py)
 
 Cách lấy:
 - Chạy script login local để Playwright tạo `facebook_storage_state.json`
@@ -218,10 +218,10 @@ Biến này có thể để trống hoặc xóa hẳn:
 Lệnh nên chạy:
 
 ```bash
-python3 source_health_check.py
-python3 weekly_memo.py --days 7 --write
-python3 watchlist_intelligence.py --write
-python3 -m unittest test_editorial_guardrails
+python3 scripts/source_health_check.py
+python3 scripts/weekly_memo.py --days 7 --write
+python3 scripts/watchlist_intelligence.py --write
+python3 -m unittest tests.test_editorial_guardrails
 ```
 
 Nếu muốn mình tiếp tục, bước sau cùng hợp lý là:
