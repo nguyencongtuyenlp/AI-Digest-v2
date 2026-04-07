@@ -93,6 +93,11 @@ class MVP3SpeedOptimizedTest(unittest.TestCase):
         result = batch_classify_and_score_node(state)
         self.assertEqual(len(result["scored_articles"]), 1)
         self.assertEqual(result["top_articles"][0]["primary_type"], "Product")
+        self.assertEqual(result["top_articles"][0]["delivery_lane_candidate"], "main")
+        self.assertEqual(result["top_articles"][0]["main_brief_eligibility"], "eligible")
+        self.assertEqual(result["top_articles"][0]["base_total_score"], 56)
+        self.assertGreaterEqual(result["top_articles"][0]["adjusted_total_score"], 56)
+        self.assertIn("applied_adjustments", result["top_articles"][0]["score_breakdown"])
         self.assertEqual(result["scored_snapshot_path"], "reports/mock.json")
 
     @patch(

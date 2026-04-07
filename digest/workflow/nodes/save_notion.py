@@ -767,6 +767,17 @@ def _create_notion_page(
         _append_formatted_markdown_blocks(children, "💡 Recommend Idea", recommend)
 
     # Score breakdown
+    base_score = int(article.get("base_total_score", article.get("score_breakdown", {}).get("base_total_score", score)) or score)
+    adjusted_score = int(
+        article.get("adjusted_total_score", article.get("score_breakdown", {}).get("adjusted_total_score", score))
+        or score
+    )
+    score_delta = adjusted_score - base_score
+    score_label = (
+        f"Score: {adjusted_score}/100 (adjusted, base {base_score}, delta {score_delta:+d})"
+        if score_delta
+        else f"Score: {adjusted_score}/100 (base)"
+    )
     children.append({
         "object": "block",
         "type": "callout",
@@ -776,7 +787,7 @@ def _create_notion_page(
                 "type": "text",
                 "text": {
                     "content": (
-                        f"Score: {score}/100 | C1: {article.get('c1_score', 0)} | C2: {article.get('c2_score', 0)} | "
+                        f"{score_label} | C1: {article.get('c1_score', 0)} | C2: {article.get('c2_score', 0)} | "
                         f"C3: {article.get('c3_score', 0)} | Delivery: {delivery_score}/15 | "
                         f"Source kind: {article.get('source_kind', 'unknown')}"
                     )

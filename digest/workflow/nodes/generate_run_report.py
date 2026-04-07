@@ -124,6 +124,46 @@ def _compact_reason_value(value: Any, limit: int = 140) -> str:
     return text[: limit - 1].rstrip() + "…"
 
 
+def _score_debug_fields(article: dict[str, Any]) -> tuple[int, int, int, list[dict[str, Any]]]:
+    breakdown = dict(article.get("score_breakdown", {}) or {})
+    c1 = int(article.get("c1_score", breakdown.get("c1_score", 0)) or 0)
+    c2 = int(article.get("c2_score", breakdown.get("c2_score", 0)) or 0)
+    c3 = int(article.get("c3_score", breakdown.get("c3_score", 0)) or 0)
+    component_total = c1 + c2 + c3
+    base_total = int(
+        breakdown.get(
+            "base_total_score",
+            article.get("base_total_score", component_total),
+        )
+        or component_total
+    )
+    adjusted_total = int(
+        breakdown.get(
+            "adjusted_total_score",
+            article.get("adjusted_total_score", article.get("total_score", base_total)),
+        )
+        or base_total
+    )
+    adjustments = list(breakdown.get("applied_adjustments", article.get("applied_adjustments", [])) or [])
+    return base_total, adjusted_total, adjusted_total - base_total, adjustments
+
+
+def _format_adjustments(adjustments: list[dict[str, Any]], limit: int = 3) -> str:
+    labels = [
+        f"{item.get('reason', item.get('kind', 'adjustment'))}{int(item.get('delta', 0) or 0):+d}"
+        for item in adjustments[:limit]
+        if isinstance(item, dict) and int(item.get("delta", 0) or 0) != 0
+    ]
+    return _compact_reason_value(labels) if labels else "-"
+
+
+def _format_score_label(article: dict[str, Any]) -> str:
+    base_total, adjusted_total, delta, _ = _score_debug_fields(article)
+    if delta == 0:
+        return f"score={adjusted_total} (base)"
+    return f"score={adjusted_total} (adjusted; base={base_total}; delta={delta:+d})"
+
+
 def _build_run_report_markdown(state: dict[str, Any], generated_at: datetime) -> str:
     raw_articles = list(state.get("raw_articles", []))
     new_articles = list(state.get("new_articles", []))
@@ -310,13 +350,15 @@ def _build_run_report_markdown(state: dict[str, Any], generated_at: datetime) ->
     if scored_articles:
         for article in scored_articles[:10]:
             breakdown = dict(article.get("score_breakdown", {}) or {})
+            base_total, adjusted_total, delta, adjustments = _score_debug_fields(article)
             lines.append(
                 "- "
                 f"[{article.get('primary_type', '?')}] "
                 f"{article.get('title', 'N/A')} | "
                 f"prefilter={breakdown.get('prefilter_score', article.get('prefilter_score', 0))} | "
                 f"c1={article.get('c1_score', 0)} c2={article.get('c2_score', 0)} c3={article.get('c3_score', 0)} | "
-                f"total={article.get('total_score', 0)} | "
+                f"base={base_total} adjusted={adjusted_total} delta={delta:+d} | "
+                f"adjustments={_format_adjustments(adjustments)} | "
                 f"source_kind={breakdown.get('source_kind', article.get('source_kind', 'unknown'))} | "
                 f"why={_compact_reason_value(breakdown.get('why_surfaced') or article.get('why_surfaced') or article.get('prefilter_reasons', []))}"
             )
@@ -332,7 +374,7 @@ def _build_run_report_markdown(state: dict[str, Any], generated_at: datetime) ->
                 "- "
                 f"[{article.get('primary_type', '?')}] "
                 f"{article.get('title', 'N/A')} | "
-                f"score={article.get('total_score', 0)} | "
+                f"{_format_score_label(article)} | "
                 f"delivery={article.get('delivery_score', 0)} | "
                 f"source={article.get('source_domain', article.get('source', ''))} | "
                 f"why={_compact_reason_value(article.get('delivery_rationale', delivery_breakdown.get('rationale', '')))}"
@@ -361,7 +403,7 @@ def _build_run_report_markdown(state: dict[str, Any], generated_at: datetime) ->
                 f"[{article.get('primary_type', '?')}] "
                 f"{article.get('title', 'N/A')} | "
                 f"source={article.get('source_domain', article.get('source', ''))} | "
-                f"score={article.get('total_score', 0)} | "
+                f"{_format_score_label(article)} | "
                 f"skip_reason={article.get('delivery_skip_reason', '') or '-'} | "
                 f"history_quality={article.get('source_history_quality_score', 50)} | "
                 f"why={_compact_reason_value(article.get('delivery_rationale', ''))}"
@@ -377,7 +419,7 @@ def _build_run_report_markdown(state: dict[str, Any], generated_at: datetime) ->
                 "- "
                 f"[{article.get('primary_type', '?')}] "
                 f"{article.get('title', 'N/A')} | "
-                f"score={article.get('total_score', 0)} | "
+                f"{_format_score_label(article)} | "
                 f"freshness={article.get('freshness_status', article.get('freshness_bucket', 'unknown'))}"
             )
     else:
@@ -393,7 +435,7 @@ def _build_run_report_markdown(state: dict[str, Any], generated_at: datetime) ->
                 "- "
                 f"[{article.get('primary_type', '?')}] "
                 f"{article.get('title', 'N/A')} | "
-                f"score={article.get('total_score', 0)} | "
+                f"{_format_score_label(article)} | "
                 f"why={_compact_reason_value(why)}"
             )
     else:

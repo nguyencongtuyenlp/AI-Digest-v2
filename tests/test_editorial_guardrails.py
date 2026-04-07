@@ -16,6 +16,7 @@ from digest.editorial.editorial_guardrails import (
     build_article_grounding,
     build_safe_digest,
     build_safe_digest_messages,
+    build_telegram_copy_from_structured,
     sanitize_delivery_text,
     validate_telegram_messages,
     validate_telegram_summary,
@@ -40,6 +41,7 @@ from digest.workflow.nodes.classify_and_score import (
     _apply_freshness_penalty,
     _articles_same_event,
     _classify_inference_with_retry,
+    _finalize_scored_article,
     _held_out_article_fallback,
     _select_top_articles,
     _prefilter_primary_type,
@@ -1313,6 +1315,124 @@ class EditorialGuardrailsTest(unittest.TestCase):
         product_message = next(message for message in result["telegram_messages"] if "🚀 Product" in message)
         self.assertIn("bổ sung khả năng tự động hóa tác vụ", product_message)
 
+    @patch("digest.workflow.nodes.summarize_vn.grok_news_copy_enabled", return_value=False)
+    @patch("digest.workflow.nodes.summarize_vn.get_history", return_value=[])
+    def test_summarize_vn_uses_structured_copy_when_grok_disabled(self, _mock_history, _mock_grok_enabled) -> None:
+        result = summarize_vn_node(
+            {
+                "run_mode": "publish",
+                "telegram_candidates": [
+                    {
+                        "title": "One product update",
+                        "url": "https://example.com/product",
+                        "primary_type": "Product",
+                        "primary_emoji": "🚀",
+                        "factual_summary_vi": "OpenAI vừa cập nhật sản phẩm kiểm soát vận hành AI.",
+                        "why_it_matters_vi": "Điểm đáng chú ý là có thêm bước approval loop giúp đội vận hành giảm lỗi.",
+                        "optional_editorial_angle": "Bài này giúp nhóm triển khai workflow AI.",
+                        "total_score": 74,
+                        "source": "RSS: Example",
+                        "source_domain": "example.com",
+                        "content_available": True,
+                        "source_verified": True,
+                        "source_tier": "a",
+                        "delivery_decision": "include",
+                    }
+                ],
+                "notion_pages": [],
+            }
+        )
+
+        product_message = next(message for message in result["telegram_messages"] if "🚀 Product" in message)
+        self.assertIn("OpenAI vừa cập nhật sản phẩm kiểm soát vận hành AI", product_message)
+        self.assertIn("approval loop", product_message)
+
+    @patch("digest.workflow.nodes.summarize_vn.rewrite_news_blurbs", side_effect=RuntimeError("grok_down"))
+    @patch("digest.workflow.nodes.summarize_vn.grok_news_copy_enabled", return_value=True)
+    @patch("digest.workflow.nodes.summarize_vn.get_history", return_value=[])
+    def test_summarize_vn_falls_back_to_structured_copy_when_grok_fails(
+        self,
+        _mock_history,
+        _mock_enabled,
+        _mock_rewrite,
+    ) -> None:
+        del _mock_rewrite
+        del _mock_enabled
+        result = summarize_vn_node(
+            {
+                "run_mode": "publish",
+                "runtime_config": {"enable_grok_news_copy": True},
+                "telegram_candidates": [
+                    {
+                        "title": "Local-first rollout update",
+                        "url": "https://example.com/local-first",
+                        "primary_type": "Product",
+                        "primary_emoji": "🚀",
+                        "factual_summary_vi": "OpenAI cập nhật mới cho triển khai on-device.",
+                        "why_it_matters_vi": "Điểm đáng chú ý là bài viết cho thấy cách giảm chi phí vận hành.",
+                        "total_score": 76,
+                        "source": "RSS: Example",
+                        "source_domain": "example.com",
+                        "content_available": True,
+                        "source_verified": True,
+                        "source_tier": "a",
+                        "delivery_decision": "include",
+                    }
+                ],
+                "notion_pages": [],
+            }
+        )
+
+        product_message = next(message for message in result["telegram_messages"] if "🚀 Product" in message)
+        self.assertIn("OpenAI cập nhật mới cho triển khai on-device", product_message)
+        self.assertIn("giảm chi phí vận hành", product_message)
+
+    def test_build_telegram_copy_from_structured_is_concise_and_coherent(self) -> None:
+        message = build_telegram_copy_from_structured(
+            {
+                "factual_summary_vi": "Đây là tin cập nhật release cho tool automation mới cho pipeline operations.",
+                "why_it_matters_vi": "Điểm đáng chú ý là có cơ chế orchestration giúp giảm thao tác thủ công và giảm rủi ro.",
+                "optional_editorial_angle": "Rất phù hợp cho đội product đang vận hành workflow nhiều bước.",
+            },
+            max_len=260,
+        )
+
+        self.assertIn("release cho tool automation", message)
+        self.assertIn("giảm thao tác thủ công", message)
+        self.assertTrue(message.endswith("."))
+        self.assertNotIn("\n", message)
+        self.assertLessEqual(len(message), 260)
+
+    def test_sanitize_delivery_text_removes_opinion_leakage(self) -> None:
+        cleaned = sanitize_delivery_text(
+            "Bài này có tín hiệu quan trọng cho đội vận hành. Tuy nhiên, bạn nên theo dõi thêm trước khi làm gì đó."
+        )
+        self.assertNotIn("theo dõi thêm", cleaned)
+        self.assertNotIn("nên theo dõi", cleaned.lower())
+
+    def test_build_safe_digest_messages_keeps_backward_compat_for_legacy_note_summary(self) -> None:
+        messages = build_safe_digest_messages(
+            [
+                {
+                    "title": "Legacy note summary",
+                    "url": "https://example.com/legacy",
+                    "primary_type": "Product",
+                    "note_summary_vi": "Có tín hiệu mới về automation workflow trong sản phẩm.",
+                    "source": "RSS: Example",
+                    "source_domain": "example.com",
+                    "total_score": 81,
+                    "delivery_score": 15,
+                    "delivery_decision": "include",
+                }
+            ],
+            [],
+            today=date(2026, 4, 2),
+            allow_archive_replay=False,
+        )
+
+        product_message = next(message for message in messages if "🚀 Product" in message)
+        self.assertIn("automation workflow", product_message)
+
     def test_get_notion_parent_and_properties_supports_data_source_schema(self) -> None:
         class _FakeDatabases:
             def retrieve(self, database_id: str) -> dict:
@@ -1846,6 +1966,26 @@ class EditorialGuardrailsTest(unittest.TestCase):
                         "prefilter_score": 42,
                         "source_kind": "official",
                         "why_surfaced": ["tier:a+10", "watchlist_hit+2"],
+                        "base_total_score": 55,
+                        "adjusted_total_score": 71,
+                        "score_adjustment_total": 16,
+                        "applied_adjustments": [
+                            {"kind": "freshness", "reason": "fresh_boost", "delta": 5, "before": 55, "after": 60},
+                            {
+                                "kind": "event_consensus",
+                                "reason": "event_consensus_bonus",
+                                "delta": 6,
+                                "before": 60,
+                                "after": 66,
+                            },
+                            {
+                                "kind": "source_history",
+                                "reason": "source_history_adjustment",
+                                "delta": 5,
+                                "before": 66,
+                                "after": 71,
+                            },
+                        ],
                     },
                     "c1_score": 20,
                     "c2_score": 18,
@@ -1873,7 +2013,43 @@ class EditorialGuardrailsTest(unittest.TestCase):
         self.assertIn("## Score Breakdown", markdown)
         self.assertIn("## Why Skipped", markdown)
         self.assertIn("why=tier:a+10", markdown)
+        self.assertIn("base=55 adjusted=71 delta=+16", markdown)
+        self.assertIn("adjustments=fresh_boost+5", markdown)
         self.assertIn("Đủ mạnh để đưa vào brief", markdown)
+
+    def test_finalize_scored_article_tracks_adjusted_score_debug_fields(self) -> None:
+        article = {
+            "title": "Fresh official article",
+            "primary_type": "Product",
+            "primary_emoji": "🚀",
+            "source_kind": "official",
+            "source_domain": "openai.com",
+            "source_tier": "a",
+            "source_verified": True,
+            "content_available": True,
+            "freshness_bucket": "fresh",
+            "age_hours": 12,
+            "is_ai_relevant": True,
+            "analysis_tier": "basic",
+            "c1_score": 20,
+            "c1_reason": "Strong source.",
+            "c2_score": 18,
+            "c2_reason": "Useful for builders.",
+            "c3_score": 17,
+            "c3_reason": "Fits current workflow focus.",
+            "total_score": 55,
+        }
+
+        _apply_freshness_penalty(article, min_score=60)
+        _finalize_scored_article(article, min_score=60)
+
+        self.assertEqual(article["base_total_score"], 55)
+        self.assertEqual(article["adjusted_total_score"], 60)
+        self.assertEqual(article["score_adjustment_total"], 5)
+        self.assertTrue(article["applied_adjustments"])
+        self.assertEqual(article["applied_adjustments"][0]["reason"], "fresh_boost")
+        self.assertEqual(article["score_breakdown"]["base_total_score"], 55)
+        self.assertEqual(article["score_breakdown"]["adjusted_total_score"], 60)
 
     def test_build_run_report_markdown_includes_grok_source_gap_section(self) -> None:
         state = {

@@ -33,6 +33,11 @@ from pathlib import Path
 from typing import Any
 
 # Đảm bảo project root nằm trong sys.path
+from digest.editorial.delivery_policy import (
+    apply_main_brief_routing,
+    is_github_main_brief_significant,
+    is_github_signal_article,
+)
 from digest.runtime.mlx_runner import run_json_inference_meta
 from digest.editorial.editorial_guardrails import sanitize_delivery_text
 from digest.sources.source_catalog import classify_source_kind
@@ -67,6 +72,71 @@ def _clean_reason_snippet(text: str, limit: int = 120) -> str:
     return cleaned[: limit - 1].rstrip() + "…"
 
 
+SCORE_COMPONENT_CAPS = (33, 33, 34)
+
+
+WORKFLOW_SYSTEM_SIGNAL_KEYWORDS = (
+    "agent workflow",
+    "workflow automation",
+    "multi-step workflow",
+    "multi step workflow",
+    "orchestration",
+    "orchestrator",
+    "handoff",
+    "handoffs",
+    "review loop",
+    "approval loop",
+    "human-in-the-loop",
+    "human in the loop",
+    "tool use",
+    "tool-use",
+)
+
+HEALTHCARE_WORKFLOW_SIGNAL_KEYWORDS = (
+    "ai clinic",
+    "clinic workflow",
+    "clinical workflow",
+    "healthcare workflow",
+    "medical workflow",
+    "patient workflow",
+    "patient scheduling",
+    "appointment automation",
+    "intake automation",
+    "medical triage",
+)
+
+OPERATIONS_RELIABILITY_SIGNAL_KEYWORDS = (
+    "operations workflow",
+    "system automation",
+    "model monitoring",
+    "observability",
+    "reliability",
+    "incident response",
+    "runbook",
+    "guardrails",
+    "human review",
+    "eval",
+    "evaluation",
+)
+
+SIMULATION_DEPLOYMENT_SIGNAL_KEYWORDS = (
+    "simulation",
+    "simulator",
+    "scenario",
+    "scenario-based",
+    "local deployment",
+    "private deployment",
+    "local-first",
+    "local first",
+    "on-device",
+    "on device",
+    "edge deployment",
+    "self-hosted",
+    "self hosted",
+    "cost-aware deployment",
+    "cost-aware",
+)
+
 STRATEGIC_KEYWORDS = (
     "open-source",
     "open source",
@@ -82,6 +152,29 @@ STRATEGIC_KEYWORDS = (
     "advisory body",
     "warns",
     "competition",
+    "agent workflow",
+    "workflow automation",
+    "orchestration",
+    "multi-step workflow",
+    "human-in-the-loop",
+    "clinic workflow",
+    "healthcare workflow",
+    "medical workflow",
+    "patient workflow",
+    "operations workflow",
+    "system automation",
+    "model monitoring",
+    "observability",
+    "reliability",
+    "incident response",
+    "simulation",
+    "simulator",
+    "scenario-based",
+    "local deployment",
+    "private deployment",
+    "on-device",
+    "edge deployment",
+    "self-hosted",
 )
 
 BUSINESS_KEYWORDS = (
@@ -131,35 +224,50 @@ SOCIETY_KEYWORDS = (
     "community",
 )
 
-AI_SIGNAL_KEYWORDS = (
-    "ai",
-    "agent",
-    "model",
-    "llm",
-    "openai",
-    "anthropic",
-    "claude",
-    "gpt",
-    "deepmind",
-    "gemini",
-    "meta",
-    "xai",
-    "grok",
-    "hugging face",
-    "nvidia",
-    "robot",
-    "robotics",
-    "chip",
-    "inference",
-    "training",
-    "benchmark",
-    "research",
-    "startup",
-    "funding",
-    "acquisition",
-    "partnership",
-    "regulation",
-    "policy",
+AI_SIGNAL_KEYWORDS = tuple(
+    dict.fromkeys(
+        (
+            "ai",
+            "agent",
+            "model",
+            "llm",
+            "openai",
+            "anthropic",
+            "claude",
+            "gpt",
+            "deepmind",
+            "gemini",
+            "meta",
+            "xai",
+            "grok",
+            "hugging face",
+            "nvidia",
+            "robot",
+            "robotics",
+            "chip",
+            "inference",
+            "training",
+            "benchmark",
+            "research",
+            "startup",
+            "funding",
+            "acquisition",
+            "partnership",
+            "regulation",
+            "policy",
+        )
+        + WORKFLOW_SYSTEM_SIGNAL_KEYWORDS
+        + HEALTHCARE_WORKFLOW_SIGNAL_KEYWORDS
+        + OPERATIONS_RELIABILITY_SIGNAL_KEYWORDS
+        + (
+            "simulation",
+            "scenario-based",
+            "local deployment",
+            "private deployment",
+            "on-device",
+            "edge deployment",
+        )
+    )
 )
 
 OFF_SCOPE_KEYWORDS = (
@@ -176,42 +284,91 @@ OFF_SCOPE_KEYWORDS = (
     "showbiz",
 )
 
-FOUNDER_SIGNAL_KEYWORDS = (
-    "openai",
-    "anthropic",
-    "claude",
-    "gpt",
-    "gemini",
-    "deepmind",
-    "xai",
-    "grok",
-    "agent",
-    "agents",
-    "api",
-    "sdk",
-    "platform",
-    "model",
-    "llm",
-    "research",
-    "benchmark",
-    "inference",
-    "training",
-    "chip",
-    "gpu",
-    "startup",
-    "funding",
-    "revenue",
-    "enterprise",
-    "workflow",
-    "automation",
-    "robot",
-    "robotics",
-    "regulation",
-    "policy",
-    "safety",
-    "security",
-    "vietnam",
-    "asean",
+STRATEGIC_SIGNAL_KEYWORDS = tuple(
+    dict.fromkeys(
+        (
+            "openai",
+            "anthropic",
+            "claude",
+            "gpt",
+            "gemini",
+            "deepmind",
+            "xai",
+            "grok",
+            "agent",
+            "agents",
+            "api",
+            "sdk",
+            "platform",
+            "model",
+            "llm",
+            "research",
+            "benchmark",
+            "inference",
+            "training",
+            "chip",
+            "gpu",
+            "startup",
+            "funding",
+            "revenue",
+            "enterprise",
+            "workflow",
+            "automation",
+            "orchestration",
+            "handoff",
+            "review loop",
+            "approval loop",
+            "multi-step",
+            "multi step",
+            "human-in-the-loop",
+            "human in the loop",
+            "tool use",
+            "tool-use",
+            "healthcare",
+            "medical",
+            "clinic",
+            "patient",
+            "patient workflow",
+            "scheduling",
+            "appointment",
+            "intake",
+            "triage",
+            "operations",
+            "system automation",
+            "monitoring",
+            "observability",
+            "reliability",
+            "incident response",
+            "runbook",
+            "guardrails",
+            "simulation",
+            "scenario",
+            "simulator",
+            "local deployment",
+            "private deployment",
+            "local-first",
+            "local first",
+            "on-device",
+            "on device",
+            "edge deployment",
+            "self-hosted",
+            "self hosted",
+            "cost-aware",
+            "cost-aware deployment",
+            "robot",
+            "robotics",
+            "regulation",
+            "policy",
+            "safety",
+            "security",
+            "vietnam",
+            "asean",
+        )
+        + WORKFLOW_SYSTEM_SIGNAL_KEYWORDS
+        + HEALTHCARE_WORKFLOW_SIGNAL_KEYWORDS
+        + OPERATIONS_RELIABILITY_SIGNAL_KEYWORDS
+        + SIMULATION_DEPLOYMENT_SIGNAL_KEYWORDS
+    )
 )
 
 EDITORIAL_NOISE_KEYWORDS = (
@@ -407,55 +564,122 @@ TAG_TAXONOMY_BLOCK = "\n".join(
 
 # ── Prompt Master cho classify + score ───────────────────────────────
 CLASSIFY_SCORE_SYSTEM = """Bạn là Editorial Triage Lead cho một sản phẩm AI Daily Digest trả phí.
-Nhiệm vụ: đọc nhanh từng nguồn tin AI/Tech, chấm điểm relevance như một biên tập viên khó tính,
-và quyết định bài nào đáng được đưa vào phân tích sâu.
+Nhiệm vụ: đọc nhanh từng nguồn tin AI/Tech, chấm điểm relevance như một biên tập viên khó tính, và quyết định bài nào đáng được đưa vào phân tích sâu.
 
-## 3 Editorial Lanes (CHỌN ĐÚNG 1):
+Mục tiêu của bản tin không phải là gom mọi tin AI đang hot, mà là chọn ra những tín hiệu thực sự hữu ích cho một team đang xây hệ thống AI ứng dụng thực tế:
+- AI agent cho workflow nhiều bước
+- AI product theo domain cụ thể
+- hệ thống AI hỗ trợ vận hành / quản lý / automation
+- các sản phẩm AI cần reliability, observability, guardrails, human-in-the-loop
+- local-first / integration-friendly / deployable AI khi phù hợp
+
+## 3 Editorial Lanes (CHỌN ĐÚNG 1)
 - 🚀 Product: Ra mắt sản phẩm, tính năng mới, API, model, platform update, capability jump có tính sản phẩm
 - 🌍 Society & Culture: Tác động xã hội, giáo dục, việc làm, cộng đồng, policy/public response
 - 🛠️ Practical: Hướng dẫn, tips, workflows, playbook, tool usage, implementation lessons
 
-## 3 Tiêu chí chấm điểm (mỗi tiêu chí 0-33, tổng max 100):
+## 3 Tiêu chí chấm điểm
 
-### C1: Chất lượng tin tức (0-33)
-- Nguồn đáng tin cậy? (Reuters, TechCrunch, MIT = cao; blog random = thấp)
-- Tin mới (24-48h qua) hay cũ?
-- Tác động lớn đến ngành AI?
-- Có dữ liệu/dẫn chứng cụ thể?
-- Tin chiến lược ở nguồn mạnh về cạnh tranh AI, open-source, partnership, đầu tư hạ tầng, hay cảnh báo từ cơ quan lớn phải được xem là impact cao, kể cả khi nội dung đầu vào ngắn.
+### C1: Chất lượng tín hiệu tin tức (0-33)
+Đánh giá bài này mạnh đến đâu về mặt editorial signal:
 
-### C2: Phù hợp startup AI Việt Nam (0-33)
-- Startup AI tại Việt Nam có thể ứng dụng/học hỏi?
-- Liên quan đến thị trường Đông Nam Á?
-- Có cơ hội kinh doanh?
+Ưu tiên điểm cao nếu:
+- Nguồn đáng tin cậy, có thẩm quyền hoặc là nguồn gốc trực tiếp
+- Tin còn mới, đặc biệt trong 24-72h gần đây
+- Có tác động rõ lên hệ sinh thái AI / product / developer / operator
+- Có dữ kiện cụ thể, không chỉ headline bề mặt
+- Là tín hiệu chiến lược cấp ngành: model release, pricing change, API/platform shift, partnership, hạ tầng, safety/security incident, regulation quan trọng
+- Là update có thể làm thay đổi cách build, deploy, vận hành hoặc cạnh tranh sản phẩm AI
 
-### C3: Phù hợp dự án hiện tại (0-34)
-Công ty đang phát triển 4 MVP:
-1. AI News Digest (thu thập, phân tích, tổng hợp tin tức AI tự động)
-2. AI Revenue Calculator (tính toán doanh thu, truy cập mọi nơi trong công ty)
-3. AI Enterprise Management (quản lý toàn bộ công ty)
-4. AI Product general (hướng phát triển sản phẩm AI)
-- Tin này có giúp cải thiện sản phẩm nào ở trên không?
-- Có công nghệ/ý tưởng mới áp dụng được?
+Giảm điểm nếu:
+- Nguồn yếu, mỏng, giật tít, ít dữ kiện
+- Tin cũ, bị trùng, hoặc chủ yếu là buzz/social reaction
+- Chỉ là event promo, recap marketing, hoặc headline mơ hồ
+- Không đủ dữ kiện để kết luận mạnh
+- Không thật sự liên quan đến AI/product/workflow/system
 
-## Rules bổ sung:
+### C2: Giá trị thực tế với team builder/operator (0-33)
+Đánh giá bài này có giúp ích gì cho một team đang build AI systems thực tế không.
+
+Ưu tiên điểm cao nếu bài giúp ích rõ cho:
+- founder, operator, PM, engineer, product builder
+- team đang triển khai AI vào workflow thực
+- bài toán cost / latency / deployment / integration / governance
+- lựa chọn model, toolchain, API, infra, orchestration
+- human-in-the-loop, eval, observability, safety, reliability
+- cơ hội sản phẩm / cơ hội thương mại / tín hiệu cạnh tranh đáng theo dõi
+
+Ví dụ tín hiệu có giá trị cao:
+- model/API/platform update có thể dùng được ngay
+- workflow/tooling giúp tăng tốc triển khai AI
+- safety/security/compliance ảnh hưởng vận hành thực tế
+- pricing / cost structure / infra shift có ý nghĩa ra quyết định
+- case study deployment, enterprise adoption, operator lesson
+- domain AI có thể chuyển hóa thành sản phẩm hoặc workflow hữu ích
+
+Giảm điểm nếu:
+- thú vị nhưng không actionable
+- thiên về giải trí, opinion, meme, hoặc tranh luận cộng đồng
+- không giúp ích cho việc ra quyết định sản phẩm / hệ thống / vận hành
+
+### C3: Phù hợp định hướng sản phẩm và hệ thống hiện tại (0-34)
+Nhóm hiện tại ưu tiên các hướng sau:
+1. AI agent thực chiến cho workflow nhiều bước và nghiệp vụ thực
+   - ví dụ: AI Clinic cho hỗ trợ quy trình phòng khám sản phụ
+   - các agent phối hợp nhiều bước, hỗ trợ nhân sự, giảm thao tác thủ công
+2. Hệ thống AI cho quản lý vận hành / workflow / orchestration / automation
+   - vận hành nội bộ, quản lý dự án, phối hợp tool, process support
+3. AI product áp dụng theo domain cụ thể
+   - healthcare-support workflow
+   - operations workflow
+   - vertical AI / applied AI
+4. Sản phẩm mô phỏng / interactive / scenario-based AI
+   - ví dụ game giả lập, simulation-driven product, scenario engine
+5. Các thành phần nền giúp build AI system bền vững
+   - memory, tool-use, eval, monitoring, guardrails, reliability, observability, cost-aware deployment, local/private deployment khi phù hợp
+
+Ưu tiên điểm cao nếu bài có ích rõ cho:
+- agent systems, tool use, memory, planning, coordination
+- orchestration, multi-step workflow, handoff, review loop
+- deployment, integration, monitoring, reliability, safety
+- human-in-the-loop systems
+- domain deployment như healthcare, operations, simulation
+- applied AI / vertical AI / real-world AI product
+- local-first / private / cost-aware AI system design khi phù hợp
+- những gì giúp build sản phẩm AI dùng được trong môi trường thực, không chỉ demo
+
+Giảm điểm nếu:
+- chỉ hot nhưng không giúp xây hệ thống tốt hơn
+- không liên quan nhiều tới agent, workflow, deployment, productization hoặc domain AI
+- quá xa khỏi hướng applied AI / operational AI / system AI
+- chỉ là social buzz hoặc showcase mỏng
+
+## Rules bổ sung
 - Nếu bài vốn mang màu research/business/policy nhưng có giá trị rõ nhất ở góc sản phẩm, xếp vào `Product`.
 - Nếu bài phản ánh tác động tới con người, xã hội, giáo dục, công việc hoặc phản ứng chính sách/cộng đồng, xếp vào `Society & Culture`.
-- Nếu bài thiên về hướng dẫn dùng tool, workflow, implementation, cách làm thực tế, xếp vào `Practical`.
+- Nếu bài thiên về cách dùng tool, workflow, implementation, operator lesson, case study thực chiến, xếp vào `Practical`.
 - Nếu bài research/business/policy không fit rõ vào 3 lane trên, hãy hạ điểm và nghiêng về `skip` hoặc `basic` thay vì cố nhét.
-- Cấp độ phù hợp (relevance_level): High (Tổng C1+C2+C3 >= 70), Medium (40-69), Low (< 40)
-- Mức xử lý (analysis_tier):
+- `relevance_level`:
+  - High nếu tổng điểm >= 70
+  - Medium nếu 40-69
+  - Low nếu < 40
+- `analysis_tier`:
   - deep: bài đủ mạnh để đầu tư research/thinking sâu
-  - basic: nên lưu và đưa vào digest, nhưng không cần research dài
-  - skip: tín hiệu yếu, ít giá trị với sản phẩm kinh doanh
-- Nếu nguồn mạnh (đặc biệt Reuters/CNBC/Bloomberg/TechCrunch) và chủ đề mang tính chiến lược cấp ngành, mặc định nghiêng về `deep` trừ khi bài quá mỏng hoặc không liên quan AI.
-- editorial_angle: 1 câu nói rõ "điểm đáng quan tâm nhất" của bài này dưới góc nhìn người vận hành startup AI
+  - basic: nên lưu và có thể đưa vào digest, nhưng không cần research dài
+  - skip: tín hiệu yếu, ít giá trị với hướng sản phẩm/hệ thống hiện tại
+- Nếu nguồn mạnh (đặc biệt official source, Reuters, Bloomberg, CNBC, TechCrunch, MIT, DeepMind, OpenAI, Anthropic, Meta, NVIDIA, Hugging Face) và chủ đề mang tính chiến lược cấp ngành, mặc định nghiêng về `deep` trừ khi bài quá mỏng hoặc không liên quan AI.
+- `editorial_angle`: 1 câu nói rõ điểm đáng quan tâm nhất của bài này dưới góc nhìn người build sản phẩm/hệ thống AI thực tế.
+- `summary_vi`: tóm tắt 2-3 câu, factual, rõ ý, không hype.
 - Tags: Chỉ được chọn 1-3 tag từ taxonomy chuẩn bên dưới.
-- Không được bịa tag mới, không dùng tên công ty/người/số tiền làm tag, không copy nguyên title.
+- Không được bịa tag mới.
+- Không dùng tên công ty/người/số tiền làm tag.
+- Không copy nguyên title làm tag.
 - Nếu không có tag nào đủ chắc, trả `[]`.
 - KHÔNG TỰ TÍNH TỔNG ĐIỂM trong JSON (bộ phận Python sẽ lo việc tính tổng).
-- Không hype. Không dùng ngôn ngữ quảng cáo. Nếu thiếu dữ liệu, nói rõ là thiếu dữ liệu.
-- Nếu Content_available=false (thiếu nội dung) hoặc Published_at trống: hạ điểm C1, tránh kết luận mạnh.
+- Không hype. Không dùng ngôn ngữ quảng cáo.
+- Nếu dữ liệu thiếu, nói rõ là tín hiệu còn mỏng hoặc chưa đủ dữ kiện.
+- Nếu `Content_available=false` hoặc `Published_at` trống: hạ điểm C1 và tránh kết luận mạnh.
+- Ưu tiên factual judgement hơn là viết văn hay. Nhiệm vụ ở đây là triage và structured scoring, không phải final newsletter writing.
 
 ## Tag Taxonomy
 __TAG_TAXONOMY__
@@ -470,11 +694,14 @@ __TAG_TAXONOMY__
   "c2_reason": "Giải thích ngắn gọn (1 câu)",
   "c3_score": 0-34,
   "c3_reason": "Giải thích ngắn gọn (1 câu)",
-  "summary_vi": "Tóm tắt 2-3 câu bằng tiếng Việt",
-  "editorial_angle": "1 câu về điểm đáng quan tâm nhất",
-  "analysis_tier": "deep|basic|skip",
-  "tags": ["tag1", "tag2", "tag3"],
-  "relevance_level": "High|Medium|Low"
+"summary_vi": "Tóm tắt 2-3 câu bằng tiếng Việt",
+"factual_summary_vi": "Tóm tắt thực chứng 1-2 câu, tập trung dữ kiện và tín hiệu",
+"editorial_angle": "1 câu về điểm đáng quan tâm nhất",
+"why_it_matters_vi": "1-2 câu ngắn nêu lý do đáng chú ý cho team operator/developer",
+"optional_editorial_angle": "Câu ngắn về bối cảnh/điểm nhấn, có thể ngắn hơn editorial_angle",
+"analysis_tier": "deep|basic|skip",
+"tags": ["tag1", "tag2", "tag3"],
+"relevance_level": "High|Medium|Low"
 }""".replace("__TAG_TAXONOMY__", TAG_TAXONOMY_BLOCK)
 
 CLASSIFY_SCORE_USER_TEMPLATE = """Phân loại và chấm điểm bài viết sau:
@@ -537,7 +764,10 @@ CLASSIFY_RESPONSE_FORMAT: dict[str, Any] = {
                 "c3_score": {"type": "integer", "minimum": 0, "maximum": 34},
                 "c3_reason": {"type": "string"},
                 "summary_vi": {"type": "string"},
+                "factual_summary_vi": {"type": "string"},
                 "editorial_angle": {"type": "string"},
+                "why_it_matters_vi": {"type": "string"},
+                "optional_editorial_angle": {"type": "string"},
                 "analysis_tier": {"type": "string", "enum": ["deep", "basic", "skip"]},
                 "tags": {"type": "array", "items": {"type": "string"}, "maxItems": 3},
                 "relevance_level": {"type": "string", "enum": ["High", "Medium", "Low"]},
@@ -723,20 +953,30 @@ def _classify_prose_rescue(article: dict[str, Any], raw: str, min_score: int) ->
     rescued_type = _infer_type_from_prose(raw, fallback_type)
     article["primary_type"] = rescued_type
 
-    summary = " ".join(sentences[:2]).strip()
-    if summary:
-        article["summary_vi"] = sanitize_delivery_text(_clean_prose_snippet(summary, limit=260), max_len=260)
+    factual_summary = _clean_prose_snippet(" ".join(sentences[:2]).strip(), limit=260)
+    if factual_summary:
+        factual_summary = sanitize_delivery_text(factual_summary, max_len=260)
+    why_raw = " ".join(sentences[1:2]).strip()
+    if not why_raw:
+        why_raw = f"Điểm đáng chú ý là {sentences[0][:160]}"
+    why_it_matters = sanitize_delivery_text(_clean_prose_snippet(why_raw, limit=180), max_len=180)
+    optional_angle = sanitize_delivery_text(_clean_prose_snippet(why_raw, limit=180), max_len=180)
 
-    if len(sentences) >= 2:
-        article["editorial_angle"] = sanitize_delivery_text(_clean_prose_snippet(sentences[1], limit=180), max_len=180)
-    else:
-        article["editorial_angle"] = sanitize_delivery_text(
-            _clean_prose_snippet(
-            f"Điểm đáng chú ý là {sentences[0][:140]}",
-            limit=180,
-            ),
-            max_len=180,
-        )
+    article["factual_summary_vi"] = factual_summary
+    article["why_it_matters_vi"] = why_it_matters or (
+        sanitize_delivery_text(_clean_prose_snippet(sentences[0], limit=160), max_len=160)
+        if sentences
+        else ""
+    )
+    article["optional_editorial_angle"] = optional_angle
+    article["summary_vi"] = factual_summary or sanitize_delivery_text(
+        _clean_prose_snippet(sentences[0], limit=260),
+        max_len=260,
+    )
+    article["editorial_angle"] = optional_angle or sanitize_delivery_text(
+        _clean_prose_snippet(sentences[-1], limit=180),
+        max_len=180,
+    )
 
     if article.get("analysis_tier") == "skip" and int(article.get("total_score", 0) or 0) >= max(38, min_score - 22):
         article["analysis_tier"] = "basic"
@@ -850,6 +1090,21 @@ def _llm_failure_fallback(article: dict[str, Any], min_score: int) -> None:
                     "highlights",
                     "recap",
                     "glasses",
+                    "workflow",
+                    "orchestration",
+                    "human-in-the-loop",
+                    "clinic",
+                    "healthcare",
+                    "medical",
+                    "observability",
+                    "reliability",
+                    "incident response",
+                    "simulation",
+                    "scenario",
+                    "local deployment",
+                    "private deployment",
+                    "on-device",
+                    "edge deployment",
                 )
             )
         )
@@ -872,6 +1127,9 @@ def _llm_failure_fallback(article: dict[str, Any], min_score: int) -> None:
         "Bài này ghi nhận một cập nhật mới trong hệ sinh thái AI, nhưng lượt classify hiện tại không trả JSON ổn định "
         "nên hệ giữ ở chế độ fallback an toàn."
     )
+    editorial = (
+        "Bài này có tín hiệu đủ gần để theo dõi trong batch chính."
+    )
     editorial_angle = (
         "Điểm đáng chú ý là chủ đề và nguồn vẫn đủ rõ để giữ lại trong batch, nhưng phần diễn giải cần bám chặt dữ kiện sẵn có."
     )
@@ -893,11 +1151,15 @@ def _llm_failure_fallback(article: dict[str, Any], min_score: int) -> None:
             "c3_reason": "Có thể hữu ích cho định hướng agent, sản phẩm AI hoặc theo dõi đối thủ.",
             "total_score": total_score,
             "summary_vi": summary,
+            "factual_summary_vi": summary,
+            "why_it_matters_vi": editorial,
+            "optional_editorial_angle": editorial_angle,
             "editorial_angle": editorial_angle,
             "analysis_tier": analysis_tier,
             "tags": [],
         }
     )
+    _initialize_score_tracking(article, component_source="fallback")
     _recompute_relevance_level(article)
     _normalize_primary_type(article)
     _normalize_article_tags(article)
@@ -949,9 +1211,14 @@ def _prefilter_score(
         priority_bonus = 2
     elif source_priority >= 60:
         priority_bonus = 1
+    if source_kind == "github":
+        priority_bonus = min(priority_bonus, 2 if is_github_main_brief_significant(article) else 1)
+    elif source_kind == "community":
+        priority_bonus = min(priority_bonus, 1)
+
     if priority_bonus:
         score += priority_bonus
-        reasons.append(f"source_kind:{source_kind}+{priority_bonus}")
+        reasons.append(f"source_priority:{source_kind}+{priority_bonus}")
 
     if source_history_runs >= 3 and source_history_bonus > 0:
         learned_bonus = min(2, source_history_bonus)
@@ -974,8 +1241,14 @@ def _prefilter_score(
 
     if community_strength:
         bonus = min(4, community_strength)
+        if source_kind == "github":
+            bonus = min(bonus, 2 if is_github_main_brief_significant(article) else 1)
         score += bonus
         reasons.append(f"community_signal+{bonus}")
+
+    if source_kind == "github" and not is_github_main_brief_significant(article):
+        score -= 3
+        reasons.append("github_generic-3")
 
     freshness_bonus = {
         "breaking": 10,
@@ -1021,14 +1294,14 @@ def _prefilter_score(
         score += ai_bonus
         reasons.append(f"ai_hits+{ai_bonus}")
 
-    founder_hits = sum(1 for keyword in FOUNDER_SIGNAL_KEYWORDS if keyword in lowered_text)
-    if founder_hits:
-        founder_bonus = min(6, founder_hits)
-        score += founder_bonus
-        reasons.append(f"founder_hits+{founder_bonus}")
+    strategic_hits = sum(1 for keyword in STRATEGIC_SIGNAL_KEYWORDS if keyword in lowered_text)
+    if strategic_hits:
+        strategic_bonus = min(6, strategic_hits)
+        score += strategic_bonus
+        reasons.append(f"strategic_hits+{strategic_bonus}")
     elif source_tier == "c":
         score -= 6
-        reasons.append("no_founder_signal_c_source-6")
+        reasons.append("no_strategic_signal_c_source-6")
 
     offscope_hits = [keyword for keyword in OFF_SCOPE_KEYWORDS if keyword in lowered_title]
     if offscope_hits:
@@ -1072,9 +1345,9 @@ def _prefilter_score(
     if preferences.get("strict_source_review") and source_tier in {"c", "unknown"}:
         score -= 2
         reasons.append("feedback_strict_source-2")
-    if preferences.get("prefer_founder_angle") and (watchlist_hit or founder_hits > 0):
+    if preferences.get("prefer_founder_angle") and (watchlist_hit or strategic_hits > 0):
         score += 2
-        reasons.append("feedback_founder+2")
+        reasons.append("feedback_strategic+2")
     if preferences.get("prefer_depth") and article.get("content_available") and source_tier in {"a", "b"}:
         score += 1
         reasons.append("feedback_depth+1")
@@ -1107,16 +1380,6 @@ def _prefilter_sort_key(article: dict[str, Any]) -> tuple[int, int, int, int, in
         1 if article.get("content_available") else 0,
     )
 
-
-def _is_github_signal_article(article: dict[str, Any]) -> bool:
-    source_domain = str(article.get("source_domain", "") or "").strip().lower()
-    return (
-        source_domain == "github.com"
-        or bool(str(article.get("github_full_name", "") or "").strip())
-        or str(article.get("github_signal_type", "") or "").strip().lower() in {"repository", "release"}
-    )
-
-
 def _prefilter_predicted_type(article: dict[str, Any]) -> str:
     return _prefilter_primary_type(str(article.get("title", "") or ""))[0]
 
@@ -1133,7 +1396,7 @@ def _apply_grok_prefilter_rerank(
     shortlist = [
         article
         for article in ranked_articles
-        if not _is_github_signal_article(article)
+        if not is_github_signal_article(article)
     ][:grok_prefilter_max_articles(runtime_config)]
     if not shortlist:
         return
@@ -1222,8 +1485,8 @@ def _prepare_classify_candidates(
     if max_candidates <= 0:
         return [], ranked + deprioritized
 
-    main_ranked = [article for article in ranked if not _is_github_signal_article(article)]
-    github_ranked = [article for article in ranked if _is_github_signal_article(article)]
+    main_ranked = [article for article in ranked if not is_github_signal_article(article)]
+    github_ranked = [article for article in ranked if is_github_signal_article(article)]
 
     main_target = min(
         len(main_ranked),
@@ -1258,7 +1521,7 @@ def _held_out_article_fallback(article: dict[str, Any]) -> None:
         for reason in prefilter_reasons
     )
     strong_main_signal = (
-        not _is_github_signal_article(article)
+        not is_github_signal_article(article)
         and ai_relevant
         and not editorial_noise
         and source_tier in {"a", "b"}
@@ -1283,6 +1546,21 @@ def _held_out_article_fallback(article: dict[str, Any]) -> None:
             if not strong_main_signal
             else "Bài này ghi nhận một cập nhật mới có giá trị, nhưng vẫn đứng sau các tín hiệu mạnh hơn ở vòng shortlist chính."
         ),
+        "factual_summary_vi": (
+            "Bài này mới dừng ở mức tín hiệu sơ bộ và chưa vượt được nhóm ứng viên mạnh hơn trong batch hiện tại."
+            if not strong_main_signal
+            else "Bài này ghi nhận một cập nhật mới có giá trị, nhưng vẫn đứng sau các tín hiệu mạnh hơn ở vòng shortlist chính."
+        ),
+        "why_it_matters_vi": (
+            "Nếu chủ đề này xuất hiện lặp lại trong nguồn chính thống, có thể cân nhắc theo dõi để bắt kịp thay đổi vận hành."
+            if not strong_main_signal
+            else "Bài này hữu ích như tín hiệu phụ để theo dõi tiến trình vận hành sản phẩm AI trong ngắn hạn."
+        ),
+        "optional_editorial_angle": (
+            "Giá trị hiện tại nằm ở việc bổ sung bối cảnh, chưa phải bài dẫn nhịp cho brief sáng."
+            if not strong_main_signal
+            else "Điểm đáng chú ý là nguồn và độ mới vẫn ổn, nên bài này còn hữu ích như một tín hiệu phụ của batch."
+        ),
         "editorial_angle": (
             "Giá trị hiện tại nằm ở việc bổ sung bối cảnh, chưa phải bài dẫn nhịp cho brief sáng."
             if not strong_main_signal
@@ -1291,16 +1569,33 @@ def _held_out_article_fallback(article: dict[str, Any]) -> None:
         "analysis_tier": "basic" if total_score >= (28 if strong_main_signal else 24) and ai_relevant else "skip",
         "tags": [],
     })
+    _initialize_score_tracking(article, component_source="held_out")
     if not ai_relevant:
         article["summary_vi"] = "Tin này chưa đủ liên quan trực tiếp tới AI để ưu tiên đưa vào brief."
+        article["factual_summary_vi"] = article["summary_vi"]
+        article["why_it_matters_vi"] = "Bài này chưa đáp ứng điều kiện AI/product/deep-opportunity của brief hiện tại."
         article["editorial_angle"] = "Bài này không phù hợp trọng tâm AI/product/business của brief sáng nay."
+        article["optional_editorial_angle"] = article["editorial_angle"]
         article["analysis_tier"] = "skip"
-        article["total_score"] = min(article["total_score"], 20)
+        _record_score_adjustment(
+            article,
+            kind="held_out_cap",
+            reason="not_ai_cap",
+            new_total=min(int(article.get("total_score", 0) or 0), 20),
+        )
     if editorial_noise:
         article["summary_vi"] = "Bài này lệch khá xa trọng tâm AI/product/business của brief sáng nay."
+        article["factual_summary_vi"] = article["summary_vi"]
+        article["why_it_matters_vi"] = "Nội dung chưa đủ tín hiệu vận hành thực tế để đẩy lên main brief."
         article["editorial_angle"] = "Nội dung gần với noise bề mặt hơn là tín hiệu quyết định cho batch hiện tại."
+        article["optional_editorial_angle"] = article["editorial_angle"]
         article["analysis_tier"] = "skip"
-        article["total_score"] = min(article["total_score"], 8)
+        _record_score_adjustment(
+            article,
+            kind="held_out_cap",
+            reason="editorial_noise_cap",
+            new_total=min(int(article.get("total_score", 0) or 0), 8),
+        )
     _recompute_relevance_level(article)
     _normalize_article_tags(article)
     article["summary_vi"] = sanitize_delivery_text(article.get("summary_vi", ""), max_len=260)
@@ -1354,7 +1649,12 @@ def _apply_strategic_boost(article: dict[str, Any], min_score: int) -> None:
 
         # Nếu content đầy đủ, boost thêm chút để tăng cơ hội vào top list.
         if content_available and score < min_score:
-            article["total_score"] = min(min_score, score + 8)
+            _record_score_adjustment(
+                article,
+                kind="strategic_boost",
+                reason="strong_source_strategic_signal",
+                new_total=min(min_score, score + 8),
+            )
 
 
 def _normalize_key(text: str) -> str:
@@ -1406,6 +1706,9 @@ def _contains_signal(text: str, signal: str) -> bool:
 def _article_tag_text(article: dict[str, Any], raw_tags: list[str]) -> str:
     fields = [
         article.get("title", ""),
+        article.get("factual_summary_vi", ""),
+        article.get("why_it_matters_vi", ""),
+        article.get("optional_editorial_angle", ""),
         article.get("summary_vi", ""),
         article.get("editorial_angle", ""),
         article.get("content", ""),
@@ -1461,6 +1764,154 @@ def _recompute_relevance_level(article: dict[str, Any]) -> None:
         article["relevance_level"] = "Low"
 
 
+def _clamp_score(value: Any, *, low: int = 0, high: int = 100) -> int:
+    try:
+        numeric = int(value or 0)
+    except (TypeError, ValueError):
+        numeric = 0
+    return max(low, min(high, numeric))
+
+
+def _allocate_component_scores(total_score: int) -> tuple[int, int, int]:
+    total = _clamp_score(total_score)
+    raw_scores = [total * cap / 100 for cap in SCORE_COMPONENT_CAPS]
+    allocated = [min(cap, int(raw_score)) for cap, raw_score in zip(SCORE_COMPONENT_CAPS, raw_scores)]
+    remaining = total - sum(allocated)
+    if remaining > 0:
+        remainders = sorted(
+            range(len(SCORE_COMPONENT_CAPS)),
+            key=lambda idx: (raw_scores[idx] - int(raw_scores[idx]), SCORE_COMPONENT_CAPS[idx] - allocated[idx]),
+            reverse=True,
+        )
+        for idx in remainders:
+            if remaining <= 0:
+                break
+            if allocated[idx] >= SCORE_COMPONENT_CAPS[idx]:
+                continue
+            allocated[idx] += 1
+            remaining -= 1
+    return allocated[0], allocated[1], allocated[2]
+
+
+def _normalize_component_scores(article: dict[str, Any]) -> int:
+    c1 = _clamp_score(article.get("c1_score", 0), low=0, high=33)
+    c2 = _clamp_score(article.get("c2_score", 0), low=0, high=33)
+    c3 = _clamp_score(article.get("c3_score", 0), low=0, high=34)
+    component_total = c1 + c2 + c3
+    fallback_total = _clamp_score(article.get("base_total_score", article.get("total_score", 0)))
+
+    if component_total <= 0 and fallback_total > 0:
+        c1, c2, c3 = _allocate_component_scores(fallback_total)
+        component_total = c1 + c2 + c3
+        article["component_score_source"] = "backfilled_from_total"
+        article.setdefault(
+            "c1_reason",
+            "Điểm C1 được nội suy từ tổng điểm gốc vì run này không giữ đủ output chi tiết của model.",
+        )
+        article.setdefault(
+            "c2_reason",
+            "Điểm C2 được nội suy từ tổng điểm gốc để giữ báo cáo debug nhất quán.",
+        )
+        article.setdefault(
+            "c3_reason",
+            "Điểm C3 được nội suy từ tổng điểm gốc để tránh trạng thái report không giải thích được.",
+        )
+    else:
+        article.setdefault("component_score_source", "explicit")
+
+    article["c1_score"] = c1
+    article["c2_score"] = c2
+    article["c3_score"] = c3
+    return component_total
+
+
+def _initialize_score_tracking(article: dict[str, Any], *, component_source: str) -> None:
+    base_total = _normalize_component_scores(article)
+    article["component_score_source"] = component_source or article.get("component_score_source", "explicit")
+    article["base_total_score"] = base_total
+    article["adjusted_total_score"] = base_total
+    article["total_score"] = base_total
+    article["score_adjustment_total"] = 0
+    article["applied_adjustments"] = []
+
+
+def _ensure_score_tracking(article: dict[str, Any]) -> None:
+    base_total = _normalize_component_scores(article)
+    adjusted_total = _clamp_score(article.get("adjusted_total_score", article.get("total_score", base_total)))
+    adjustments: list[dict[str, Any]] = []
+    running_total = base_total
+
+    for raw_item in article.get("applied_adjustments", []) or []:
+        if not isinstance(raw_item, dict):
+            continue
+        delta = _clamp_score(raw_item.get("delta", 0), low=-100, high=100)
+        if delta == 0:
+            continue
+        before = _clamp_score(raw_item.get("before", running_total))
+        after = _clamp_score(raw_item.get("after", before + delta))
+        actual_delta = after - before
+        if actual_delta == 0:
+            continue
+        adjustments.append(
+            {
+                "kind": str(raw_item.get("kind", "") or "score_adjustment"),
+                "reason": str(raw_item.get("reason", "") or "unspecified_adjustment"),
+                "delta": actual_delta,
+                "before": before,
+                "after": after,
+            }
+        )
+        running_total = after
+
+    residual_delta = adjusted_total - (base_total + sum(int(item["delta"]) for item in adjustments))
+    if residual_delta != 0:
+        before = adjusted_total - residual_delta
+        adjustments.append(
+            {
+                "kind": "compat_backfill",
+                "reason": "legacy_total_delta",
+                "delta": residual_delta,
+                "before": before,
+                "after": adjusted_total,
+            }
+        )
+
+    article["base_total_score"] = base_total
+    article["adjusted_total_score"] = adjusted_total
+    article["total_score"] = adjusted_total
+    article["applied_adjustments"] = adjustments
+    article["score_adjustment_total"] = adjusted_total - base_total
+
+
+def _record_score_adjustment(
+    article: dict[str, Any],
+    *,
+    kind: str,
+    reason: str,
+    new_total: int,
+) -> int:
+    _ensure_score_tracking(article)
+    before = _clamp_score(article.get("adjusted_total_score", article.get("total_score", 0)))
+    after = _clamp_score(new_total)
+    delta = after - before
+    article["adjusted_total_score"] = after
+    article["total_score"] = after
+    if delta != 0:
+        adjustments = list(article.get("applied_adjustments", []) or [])
+        adjustments.append(
+            {
+                "kind": kind,
+                "reason": reason,
+                "delta": delta,
+                "before": before,
+                "after": after,
+            }
+        )
+        article["applied_adjustments"] = adjustments
+    article["score_adjustment_total"] = after - _clamp_score(article.get("base_total_score", before))
+    return delta
+
+
 def _apply_freshness_penalty(article: dict[str, Any], min_score: int) -> None:
     """
     Phạt deterministic cho bài stale hoặc không rõ freshness để tránh old-news leakage.
@@ -1474,21 +1925,41 @@ def _apply_freshness_penalty(article: dict[str, Any], min_score: int) -> None:
     age_hours = article.get("age_hours")
 
     if is_stale_candidate:
-        article["total_score"] = max(0, score - 25)
+        _record_score_adjustment(
+            article,
+            kind="freshness",
+            reason="stale_candidate",
+            new_total=max(0, score - 25),
+        )
         article["freshness_status"] = "stale_candidate"
         article["analysis_tier"] = "skip" if article.get("total_score", 0) < min_score + 10 else "basic"
     elif is_old_news:
-        article["total_score"] = max(0, score - 15)
+        _record_score_adjustment(
+            article,
+            kind="freshness",
+            reason="old_news",
+            new_total=max(0, score - 15),
+        )
         article["freshness_status"] = "old_news"
         if article.get("analysis_tier") == "deep":
             article["analysis_tier"] = "basic"
     elif freshness_unknown and source_tier == "c":
-        article["total_score"] = max(0, score - 12)
+        _record_score_adjustment(
+            article,
+            kind="freshness",
+            reason="unknown_weak_source",
+            new_total=max(0, score - 12),
+        )
         article["freshness_status"] = "unknown_weak_source"
         if article.get("analysis_tier") == "deep":
             article["analysis_tier"] = "basic"
     elif freshness_unknown and not content_available:
-        article["total_score"] = max(0, score - 10)
+        _record_score_adjustment(
+            article,
+            kind="freshness",
+            reason="unknown_thin_content",
+            new_total=max(0, score - 10),
+        )
         article["freshness_status"] = "unknown_thin_content"
         if article.get("analysis_tier") == "deep":
             article["analysis_tier"] = "basic"
@@ -1496,7 +1967,12 @@ def _apply_freshness_penalty(article: dict[str, Any], min_score: int) -> None:
         article["freshness_status"] = "ok"
 
     if isinstance(age_hours, (int, float)) and age_hours <= 48 and article["freshness_status"] == "ok":
-        article["total_score"] = min(100, int(article.get("total_score", 0) or 0) + 5)
+        _record_score_adjustment(
+            article,
+            kind="freshness",
+            reason="fresh_boost",
+            new_total=min(100, int(article.get("total_score", 0) or 0) + 5),
+        )
         article["freshness_status"] = "fresh_boost"
         if article.get("analysis_tier") == "basic" and article.get("total_score", 0) >= min_score - 5:
             article["analysis_tier"] = "deep"
@@ -1526,7 +2002,12 @@ def _apply_source_history_adjustment(article: dict[str, Any], min_score: int) ->
         return
 
     article["source_history_adjustment"] = adjustment
-    article["total_score"] = max(0, min(100, total_score + adjustment))
+    _record_score_adjustment(
+        article,
+        kind="source_history",
+        reason="source_history_adjustment",
+        new_total=max(0, min(100, total_score + adjustment)),
+    )
     if adjustment < 0:
         if article.get("analysis_tier") == "deep" and article["total_score"] < min_score:
             article["analysis_tier"] = "basic"
@@ -1538,12 +2019,44 @@ def _apply_source_history_adjustment(article: dict[str, Any], min_score: int) ->
     _recompute_relevance_level(article)
 
 
+def _finalize_scored_article(article: dict[str, Any], min_score: int) -> None:
+    _ensure_score_tracking(article)
+    article["score"] = int(article.get("total_score", 0) or 0)
+    _normalize_primary_type(article)
+    _normalize_article_tags(article)
+    article["summary_vi"] = sanitize_delivery_text(article.get("summary_vi", ""), max_len=260)
+    if not article.get("factual_summary_vi"):
+        article["factual_summary_vi"] = article.get("summary_vi", "")
+    if not article.get("why_it_matters_vi"):
+        article["why_it_matters_vi"] = article.get("editorial_angle", "")
+    if not article.get("optional_editorial_angle"):
+        article["optional_editorial_angle"] = article.get("editorial_angle", "")
+
+    article["factual_summary_vi"] = sanitize_delivery_text(article.get("factual_summary_vi", ""), max_len=260)
+    article["why_it_matters_vi"] = sanitize_delivery_text(article.get("why_it_matters_vi", ""), max_len=180)
+    article["optional_editorial_angle"] = sanitize_delivery_text(article.get("optional_editorial_angle", ""), max_len=180)
+    article["editorial_angle"] = sanitize_delivery_text(article.get("editorial_angle", ""), max_len=180)
+    apply_main_brief_routing(article)
+    article["score_breakdown"] = _build_score_breakdown(article)
+    article["why_surfaced"] = article["score_breakdown"]["why_surfaced"]
+    if article.get("analysis_tier") == "skip":
+        article["why_skipped"] = article["score_breakdown"]["why_skipped"] or article["why_surfaced"][:2]
+
+
 def _build_score_breakdown(article: dict[str, Any]) -> dict[str, Any]:
+    _ensure_score_tracking(article)
     prefilter_reasons = [str(reason or "") for reason in article.get("prefilter_reasons", [])]
     c1_reason = str(article.get("c1_reason", "") or "")
     c2_reason = str(article.get("c2_reason", "") or "")
     c3_reason = str(article.get("c3_reason", "") or "")
     source_kind = str(article.get("source_kind", "unknown") or "unknown")
+    route_reason = str(article.get("main_brief_skip_reason", "") or "").strip().lower()
+    applied_adjustments = list(article.get("applied_adjustments", []) or [])
+    adjustment_labels = [
+        f"{item.get('reason', item.get('kind', 'adjustment'))}{int(item.get('delta', 0) or 0):+d}"
+        for item in applied_adjustments[:4]
+        if int(item.get("delta", 0) or 0) != 0
+    ]
 
     surfaced_reasons = prefilter_reasons[:4]
     surfaced_reasons.extend(
@@ -1554,6 +2067,7 @@ def _build_score_breakdown(article: dict[str, Any]) -> dict[str, Any]:
         ]
         if reason
     )
+    surfaced_reasons.extend(adjustment_labels)
 
     return {
         "source_kind": source_kind,
@@ -1566,15 +2080,34 @@ def _build_score_breakdown(article: dict[str, Any]) -> dict[str, Any]:
         "source_history_penalty": int(article.get("source_history_penalty", 0) or 0),
         "source_history_adjustment": int(article.get("source_history_adjustment", 0) or 0),
         "prefilter_score": int(article.get("prefilter_score", 0) or 0),
+        "interesting_signal_score": int(article.get("interesting_signal_score", article.get("total_score", 0)) or 0),
+        "delivery_lane_candidate": str(article.get("delivery_lane_candidate", "") or ""),
+        "main_brief_eligibility": str(article.get("main_brief_eligibility", "") or ""),
+        "main_brief_score": int(article.get("main_brief_score", 0) or 0),
+        "main_brief_reason_codes": list(article.get("main_brief_reason_codes", []) or []),
+        "main_brief_skip_reason": route_reason,
+        "component_score_source": str(article.get("component_score_source", "explicit") or "explicit"),
+        "component_score_sum": int(article.get("base_total_score", 0) or 0),
         "c1_score": int(article.get("c1_score", 0) or 0),
         "c2_score": int(article.get("c2_score", 0) or 0),
         "c3_score": int(article.get("c3_score", 0) or 0),
+        "base_total_score": int(article.get("base_total_score", 0) or 0),
+        "adjusted_total_score": int(article.get("adjusted_total_score", article.get("total_score", 0)) or 0),
+        "score_adjustment_total": int(article.get("score_adjustment_total", 0) or 0),
+        "score_display": "adjusted" if int(article.get("score_adjustment_total", 0) or 0) != 0 else "base",
+        "applied_adjustments": applied_adjustments,
         "total_score": int(article.get("total_score", 0) or 0),
         "why_surfaced": surfaced_reasons[:5],
         "why_skipped": [
             reason
-            for reason in prefilter_reasons
-            if reason.startswith(("editorial_noise", "blocked_domain", "soft_blocked_domain", "not_ai_relevant", "stale", "old_news", "source_history"))
+            for reason in (
+                ([f"main_brief:{route_reason}"] if route_reason else [])
+                + [
+                    reason
+                    for reason in prefilter_reasons
+                    if reason.startswith(("editorial_noise", "blocked_domain", "soft_blocked_domain", "not_ai_relevant", "stale", "old_news", "source_history"))
+                ]
+            )
         ][:5],
     }
 
@@ -1671,7 +2204,12 @@ def _annotate_event_clusters(scored_articles: list[dict[str, Any]], min_score: i
         primary = cluster[0]
         event_bonus = min(6, max(0, source_count - 1) * 3)
         if event_bonus:
-            primary["total_score"] = min(100, int(primary.get("total_score", 0) or 0) + event_bonus)
+            _record_score_adjustment(
+                primary,
+                kind="event_consensus",
+                reason="event_consensus_bonus",
+                new_total=min(100, int(primary.get("total_score", 0) or 0) + event_bonus),
+            )
             if int(primary.get("total_score", 0) or 0) >= min_score - 5 and primary.get("analysis_tier") == "basic":
                 primary["analysis_tier"] = "deep"
             _recompute_relevance_level(primary)
@@ -1900,9 +2438,9 @@ def classify_and_score_node(state: dict[str, Any]) -> dict[str, Any]:
                     c1 = int(result.get("c1_score", 0) or 0)
                     c2 = int(result.get("c2_score", 0) or 0)
                     c3 = int(result.get("c3_score", 0) or 0)
-                except ValueError:
+                except (TypeError, ValueError):
                     c1, c2, c3 = 0, 0, 0
-                    
+
                 analysis_tier = str(result.get("analysis_tier", "")).strip().lower()
                 if analysis_tier not in {"deep", "basic", "skip"}:
                     projected_total = c1 + c2 + c3
@@ -1913,58 +2451,60 @@ def classify_and_score_node(state: dict[str, Any]) -> dict[str, Any]:
                     else:
                         analysis_tier = "skip"
 
-                article.update({
-                    "primary_type": result.get("primary_type", "Practical"),
-                    "primary_emoji": result.get("primary_emoji", "🛠️"),
-                    "c1_score": c1,
-                    "c1_reason": str(result.get("c1_reason", "")),
-                    "c2_score": c2,
-                    "c2_reason": str(result.get("c2_reason", "")),
-                    "c3_score": c3,
-                    "c3_reason": str(result.get("c3_reason", "")),
-                    "total_score": c1 + c2 + c3,
-                    "summary_vi": str(result.get("summary_vi", "")),
-                    "editorial_angle": str(result.get("editorial_angle", "")),
-                    "analysis_tier": analysis_tier,
-                    "tags": result.get("tags", []) if isinstance(result.get("tags"), list) else [],
-                    "relevance_level": str(result.get("relevance_level", "Low")),
-                })
+                    article.update({
+                        "primary_type": result.get("primary_type", "Practical"),
+                        "primary_emoji": result.get("primary_emoji", "🛠️"),
+                        "c1_score": c1,
+                        "c1_reason": str(result.get("c1_reason", "")),
+                        "c2_score": c2,
+                        "c2_reason": str(result.get("c2_reason", "")),
+                        "c3_score": c3,
+                        "c3_reason": str(result.get("c3_reason", "")),
+                        "total_score": c1 + c2 + c3,
+                        "summary_vi": str(result.get("summary_vi", "")),
+                        "factual_summary_vi": str(
+                            result.get("factual_summary_vi", result.get("summary_vi", ""))
+                        ),
+                        "why_it_matters_vi": str(
+                            result.get("why_it_matters_vi", result.get("editorial_angle", ""))
+                        ),
+                        "optional_editorial_angle": str(
+                            result.get("optional_editorial_angle", result.get("editorial_angle", ""))
+                        ),
+                        "editorial_angle": str(result.get("editorial_angle", "")),
+                        "analysis_tier": analysis_tier,
+                        "tags": result.get("tags", []) if isinstance(result.get("tags"), list) else [],
+                        "relevance_level": str(result.get("relevance_level", "Low")),
+                    })
+                _initialize_score_tracking(article, component_source="model")
                 _apply_strategic_boost(article, min_score)
                 _apply_freshness_penalty(article, min_score)
                 _apply_source_history_adjustment(article, min_score)
-                article["score"] = int(article.get("total_score", 0) or 0)
-                _normalize_primary_type(article)
-                _normalize_article_tags(article)
-                article["score_breakdown"] = _build_score_breakdown(article)
-                article["why_surfaced"] = article["score_breakdown"]["why_surfaced"]
+                _finalize_scored_article(article, min_score)
             else:
                 logger.warning("⚠️ Model không trả JSON cho '%s'", title[:40])
                 _classify_prose_rescue(article, raw_output, min_score)
                 _apply_source_history_adjustment(article, min_score)
-                article["score"] = int(article.get("total_score", 0) or 0)
-                article["score_breakdown"] = _build_score_breakdown(article)
-                article["why_surfaced"] = article["score_breakdown"]["why_surfaced"]
+                _finalize_scored_article(article, min_score)
         except Exception as e:
             logger.error("❌ Classify failed: '%s': %s", title[:40], e)
             _llm_failure_fallback(article, min_score)
             _apply_source_history_adjustment(article, min_score)
-            article["score"] = int(article.get("total_score", 0) or 0)
-            article["score_breakdown"] = _build_score_breakdown(article)
-            article["why_surfaced"] = article["score_breakdown"]["why_surfaced"]
+            _finalize_scored_article(article, min_score)
 
         scored.append(article)
 
     for article in held_out_articles:
         _held_out_article_fallback(article)
         _apply_source_history_adjustment(article, min_score)
-        article["score"] = int(article.get("total_score", 0) or 0)
-        article["score_breakdown"] = _build_score_breakdown(article)
-        article["why_skipped"] = article["score_breakdown"]["why_skipped"] or article["score_breakdown"]["why_surfaced"][:2]
+        _finalize_scored_article(article, min_score)
         scored.append(article)
 
     # Sắp xếp theo score giảm dần
     scored.sort(key=lambda a: a.get("total_score", 0), reverse=True)
     primary_event_articles = _annotate_event_clusters(scored, min_score)
+    for article in scored:
+        _finalize_scored_article(article, min_score)
     primary_event_articles.sort(key=lambda a: a.get("total_score", 0), reverse=True)
 
     # Chỉ deep-dive 1 bài đại diện cho mỗi event để tránh lãng phí reasoning.

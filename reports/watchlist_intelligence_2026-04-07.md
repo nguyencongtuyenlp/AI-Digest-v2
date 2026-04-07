@@ -1,4 +1,4 @@
-# Watchlist Intelligence (06/04/2026)
+# Watchlist Intelligence (07/04/2026)
 
 - Lookback window: 14 days
 - History rows scanned: 0

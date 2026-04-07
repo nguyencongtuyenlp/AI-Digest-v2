@@ -23,16 +23,14 @@ from digest.workflow.nodes.classify_and_score import (
     _apply_source_history_adjustment,
     _apply_strategic_boost,
     _build_related_context,
-    _build_score_breakdown,
     _cfg_int,
     _classify_inference_with_retry,
     _classify_prose_rescue,
+    _finalize_scored_article,
     _held_out_article_fallback,
     _is_likely_prose_response,
     _llm_failure_fallback,
-    _normalize_article_tags,
     _normalize_classify_inference_response,
-    _normalize_primary_type,
     _prepare_classify_candidates,
     _select_top_articles,
     run_json_inference as single_article_json_inference,
@@ -45,14 +43,6 @@ def _batch_response_format(max_items: int) -> dict[str, Any]:
     item_schema = dict(CLASSIFY_RESPONSE_FORMAT["json_schema"]["schema"])
     properties = dict(item_schema.get("properties", {}))
     required = list(item_schema.get("required", []))
-
-    # FIX lỗi "Infrastructure" và các type mới
-    if "primary_type" in properties:
-        properties["primary_type"] = {
-            "type": "string",
-            "enum": ["Product", "Society & Culture", "Practical", "Infrastructure", "Business",
-                     "Technology", "Research", "Policy", "Security", "Enterprise", "AI Tools"]
-        }
 
     properties["item_id"] = {"type": "string"}
     required = ["item_id", *required]
@@ -88,7 +78,7 @@ def _batch_system_prompt() -> str:
         f"{CLASSIFY_SCORE_SYSTEM}\n\n"
         "# // MVP3 Speed Optimized - Batch + Parallel\n"
         "Bạn xử lý nhiều bài viết ĐỘC LẬP. Không so sánh chéo.\n"
-        "primary_type CHỈ được dùng các giá trị: Product, Society & Culture, Practical, Infrastructure, Business, Technology, Research, Policy, Security, Enterprise, AI Tools.\n"
+        "primary_type CHỈ được dùng các giá trị: Product, Society & Culture, Practical.\n"
         "Trả về đúng JSON với key `articles`. Mỗi item phải có `item_id`.\n"
         "Tuân thủ nghiêm ngặt schema. Không thêm text ngoài JSON."
     )
@@ -159,14 +149,15 @@ def _apply_result(article: dict[str, Any], result: dict[str, Any], min_score: in
             "relevance_level": str(result.get("relevance_level", "Low")),
         }
     )
+    article["component_score_source"] = "model"
+    article["base_total_score"] = c1 + c2 + c3
+    article["adjusted_total_score"] = c1 + c2 + c3
+    article["score_adjustment_total"] = 0
+    article["applied_adjustments"] = []
     _apply_strategic_boost(article, min_score)
     _apply_freshness_penalty(article, min_score)
     _apply_source_history_adjustment(article, min_score)
-    article["score"] = int(article.get("total_score", 0) or 0)
-    _normalize_primary_type(article)
-    _normalize_article_tags(article)
-    article["score_breakdown"] = _build_score_breakdown(article)
-    article["why_surfaced"] = article["score_breakdown"]["why_surfaced"]
+    _finalize_scored_article(article, min_score)
 
 
 def _fallback_single_article(
@@ -219,16 +210,12 @@ def _fallback_single_article(
         else:
             _classify_prose_rescue(article, raw_output, min_score)
             _apply_source_history_adjustment(article, min_score)
-            article["score"] = int(article.get("total_score", 0) or 0)
-            article["score_breakdown"] = _build_score_breakdown(article)
-            article["why_surfaced"] = article["score_breakdown"]["why_surfaced"]
+            _finalize_scored_article(article, min_score)
     except Exception as exc:
         logger.error("❌ Batch classify single fallback failed: '%s': %s", article.get("title", "N/A")[:42], exc)
         _llm_failure_fallback(article, min_score)
         _apply_source_history_adjustment(article, min_score)
-        article["score"] = int(article.get("total_score", 0) or 0)
-        article["score_breakdown"] = _build_score_breakdown(article)
-        article["why_surfaced"] = article["score_breakdown"]["why_surfaced"]
+        _finalize_scored_article(article, min_score)
     return article
 
 
@@ -320,13 +307,13 @@ def batch_classify_and_score_node(state: dict[str, Any]) -> dict[str, Any]:
     for article in held_out_articles:
         _held_out_article_fallback(article)
         _apply_source_history_adjustment(article, min_score)
-        article["score"] = int(article.get("total_score", 0) or 0)
-        article["score_breakdown"] = _build_score_breakdown(article)
-        article["why_skipped"] = article["score_breakdown"]["why_skipped"] or article["score_breakdown"]["why_surfaced"][:2]
+        _finalize_scored_article(article, min_score)
         scored.append(article)
 
     scored.sort(key=lambda a: a.get("total_score", 0), reverse=True)
     primary_event_articles = _annotate_event_clusters(scored, min_score)
+    for article in scored:
+        _finalize_scored_article(article, min_score)
     primary_event_articles.sort(key=lambda a: a.get("total_score", 0), reverse=True)
     top, score_cutoff = _select_top_articles(primary_event_articles, max_items=max_top)
     low = [article for article in scored if article not in top]

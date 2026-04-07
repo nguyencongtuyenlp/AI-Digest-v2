@@ -103,6 +103,24 @@ INTERNAL_COPY_PATTERNS = (
         "",
     ),
 )
+OPINION_LEAKAGE_PATTERNS = (
+    re.compile(r"\b(?:chỉ\s+)?theo dõi thêm\b", re.IGNORECASE),
+    re.compile(r"\b(?:cần|phải)\s+theo dõi\b", re.IGNORECASE),
+    re.compile(
+        r"\b(?:nên|cần)\s+(?:ưu tiên|đọc|theo dõi|áp dụng|triển khai|thử|đánh giá)\b",
+        re.IGNORECASE,
+    ),
+)
+STRUCTURED_COPY_FIELDS = (
+    "telegram_blurb_vi",
+    "telegram_news_blurb_vi",
+    "factual_summary_vi",
+    "why_it_matters_vi",
+    "optional_editorial_angle",
+    "note_summary_vi",
+    "summary_vi",
+    "editorial_angle",
+)
 DANGLING_END_RE = re.compile(r"(,?\s*(nhưng|tuy nhiên|do|do đó|vì vậy|song|đồng thời|đặc biệt là))[\s,.!?:;…-]*$", re.IGNORECASE)
 TITLE_NOISE_PATTERNS = (
     re.compile(r"\s*-\s*\.:.*?:\.\s*", re.IGNORECASE),
@@ -167,6 +185,92 @@ def _clean_text(text: Any, max_len: int = 400) -> str:
     if len(cleaned) <= max_len:
         return cleaned
     return cleaned[: max_len - 1].rstrip() + "…"
+
+
+def _sentence_join(parts: list[str]) -> str:
+    normalized: list[str] = []
+    for part in parts:
+        chunk = _strip_note_prefix(part).strip(" -–—…")
+        if not chunk:
+            continue
+        if not chunk[0].isupper():
+            chunk = chunk[:1].upper() + chunk[1:] if chunk else chunk
+        if not chunk.endswith((".", "!", "?", "…")):
+            chunk += "."
+        if normalized and normalized[-1].lower().strip().endswith(("nó", "điểm này", "vấn đề này")):
+            normalized.append(chunk)
+        elif normalized and chunk.lower().startswith(("nhưng", "và", "đồng thời", "cũng", "điều này")):
+            normalized[-1] = normalized[-1].rstrip(". …") + ", " + chunk[0].lower() + chunk[1:]
+        else:
+            normalized.append(chunk)
+    return " ".join(normalized)
+
+
+def _build_structured_copy_candidates(article: dict[str, Any]) -> list[str]:
+    ordered: list[str] = []
+    for field in STRUCTURED_COPY_FIELDS:
+        text = str(article.get(field, "") or "").strip()
+        if text:
+            ordered.append(text)
+    return ordered
+
+
+def _dedupe_sentence_like(base: list[str], candidate: str) -> bool:
+    normalized = candidate.lower().strip()
+    if not normalized:
+        return True
+    for item in base:
+        existing = item.lower().strip()
+        if not existing:
+            continue
+        if normalized in existing or existing in normalized:
+            return True
+        if len(normalized) > 20 and len(existing) > 20:
+            if normalized[:35] == existing[:35]:
+                return True
+    return False
+
+
+def _prune_opinion_leakage(text: str) -> str:
+    # Giữ luồng đọc tự nhiên, nhưng cắt các câu kiểu khuyến nghị "nên/thử/áp dụng".
+    segments = [segment.strip() for segment in re.split(r"(?<=[.!?…])\s+", _clean_text(text, max_len=900)) if segment.strip()]
+    retained: list[str] = []
+    for segment in segments:
+        lower = segment.lower()
+        if any(pattern.search(lower) for pattern in OPINION_LEAKAGE_PATTERNS):
+            continue
+        retained.append(segment)
+    return " ".join(retained)
+
+
+def build_telegram_copy_from_structured(article: dict[str, Any], *, max_len: int = 320) -> str:
+    factual = str(article.get("factual_summary_vi", "") or "").strip()
+    why = str(article.get("why_it_matters_vi", "") or "").strip()
+    angle = str(article.get("optional_editorial_angle", "") or "").strip()
+
+    pieces: list[str] = []
+    if factual:
+        pieces.append(factual)
+    if why and not _dedupe_sentence_like([factual] if factual else [], why):
+        pieces.append(why)
+    if angle and not _dedupe_sentence_like([factual, why], angle):
+        pieces.append(angle)
+
+    if not pieces:
+        for value in _build_structured_copy_candidates(article):
+            if value and not _dedupe_sentence_like(pieces, value):
+                pieces.append(value)
+            if len(pieces) >= 2:
+                break
+
+    copy_text = _sentence_join(pieces[:2])
+    if not copy_text:
+        copy_text = _clean_text(article.get("title", ""), max_len=180)
+
+    cleaned = _prune_opinion_leakage(_clean_archive_summary(copy_text))
+    if not cleaned:
+        return ""
+    return sanitize_delivery_text(cleaned, max_len=max_len)
 
 
 def _strip_note_prefix(text: str) -> str:
@@ -261,6 +365,7 @@ def sanitize_delivery_text(text: Any, max_len: int = 320) -> str:
     """
     cleaned = _clean_text(text, max_len=max_len * 2)
     cleaned = _strip_note_prefix(cleaned)
+    cleaned = _prune_opinion_leakage(cleaned)
     cleaned = NON_VIETNAMESE_CJK_RE.sub(" ", cleaned)
     cleaned = NON_VIETNAMESE_PUNCT_RE.sub(" ", cleaned)
     for pattern, replacement in INTERNAL_COPY_PATTERNS:
@@ -686,15 +791,11 @@ def build_safe_digest_messages(
 
         for article in selected:
             title = escape(_clean_title_text(article.get("title", "Untitled")))
-            base_summary = (
-                article.get("telegram_blurb_vi")
-                or article.get("telegram_news_blurb_vi")
-                or article.get("note_summary_vi")
-                or article.get("summary_vi")
-                or article.get("editorial_angle")
-                or article.get("title", "")
+            base_summary = build_telegram_copy_from_structured(
+                article,
+                max_len=360,
             )
-            summary = sanitize_delivery_text(_clean_archive_summary(str(base_summary or "")))
+            summary = _clean_text(base_summary or "", max_len=420)
             if not summary:
                 summary = "Đang cập nhật chi tiết trong bài viết."
             if article.get("is_repeat"):

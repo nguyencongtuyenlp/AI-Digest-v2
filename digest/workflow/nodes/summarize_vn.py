@@ -11,7 +11,11 @@ import logging
 from typing import Any
 
 from digest.storage.db import get_history
-from digest.editorial.editorial_guardrails import build_safe_digest, build_safe_digest_messages
+from digest.editorial.editorial_guardrails import (
+    build_safe_digest,
+    build_safe_digest_messages,
+    build_telegram_copy_from_structured,
+)
 from digest.runtime.xai_grok import (
     grok_news_copy_enabled,
     grok_news_copy_max_articles,
@@ -64,12 +68,12 @@ def _telegram_eligible_articles(articles: list[dict[str, Any]]) -> list[dict[str
     eligible: list[dict[str, Any]] = []
     skipped = 0
     for article in articles:
-        summary = str(article.get("note_summary_vi", "") or "").strip()
+        summary = build_telegram_copy_from_structured(article, max_len=360)
         note_summary_vi = summary.lower()
         if note_summary_vi and any(phrase in note_summary_vi for phrase in BAD_PHRASES):
             skipped += 1
             continue
-        if len(summary) < 80:
+        if len(summary) < 30:
             skipped += 1
             continue
         if summary.count("(") >= 2 and any(
@@ -118,7 +122,11 @@ def _apply_grok_news_copy(
     if not shortlist:
         return
 
-    rewritten = rewrite_news_blurbs(shortlist, feedback_summary_text=feedback_summary_text)
+    try:
+        rewritten = rewrite_news_blurbs(shortlist, feedback_summary_text=feedback_summary_text)
+    except Exception:
+        logger.exception("⚠️ Grok news copy failed; using deterministic fallback copy.")
+        rewritten = {}
     updated = 0
     for article in shortlist:
         key = str(article.get("url", "") or article.get("title", "") or "")
