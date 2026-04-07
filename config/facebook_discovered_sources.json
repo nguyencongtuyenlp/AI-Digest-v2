@@ -1,22 +1,412 @@
 [
   {
-    "label": "OpenClaw VN",
-    "url": "https://www.facebook.com/groups/2403721346759140/",
+    "label": "Claude Ai Community",
+    "url": "https://www.facebook.com/groups/claudeaicommunity/",
+    "source_type": "group",
+    "discovery_origin": "joined",
+    "ai_source_score": 100,
+    "status": "auto_active",
+    "last_seen_at": "2026-04-07T08:04:08.076882+00:00",
+    "last_crawled_at": ""
+  },
+  {
+    "label": "Claude Ai Community",
+    "url": "https://www.facebook.com/groups/1193448769488955/",
+    "source_type": "group",
+    "discovery_origin": "joined",
+    "ai_source_score": 100,
+    "status": "auto_active",
+    "last_seen_at": "2026-04-07T08:04:08.076871+00:00",
+    "last_crawled_at": ""
+  },
+  {
+    "label": "Cộng đồng Claude AI & AI Agents Việt Nam",
+    "url": "https://www.facebook.com/groups/861108920047086/",
+    "source_type": "group",
+    "discovery_origin": "joined",
+    "ai_source_score": 100,
+    "status": "auto_active",
+    "last_seen_at": "2026-04-07T08:04:08.076116+00:00",
+    "last_crawled_at": ""
+  },
+  {
+    "label": "Nghiện AI - Ứng dụng A.I. & Data Vào Công Việc Hàng Ngày",
+    "url": "https://www.facebook.com/groups/aiartworksvn/",
+    "source_type": "group",
+    "discovery_origin": "joined",
+    "ai_source_score": 100,
+    "status": "auto_active",
+    "last_seen_at": "2026-04-07T08:04:08.076041+00:00",
+    "last_crawled_at": ""
+  },
+  {
+    "label": "OpenClaw AI Kiếm Cơm",
+    "url": "https://www.facebook.com/groups/openclawxvn/",
+    "source_type": "group",
+    "discovery_origin": "joined",
+    "ai_source_score": 100,
+    "status": "auto_active",
+    "last_seen_at": "2026-04-07T08:04:08.076129+00:00",
+    "last_crawled_at": ""
+  },
+  {
+    "label": "PHỔ CẬP AI 🚀✨ ChatGPT, VEO 3, Gemini, make, Kling, Hailuo... AI Automation",
+    "url": "https://www.facebook.com/groups/phocapaivn/",
+    "source_type": "group",
+    "discovery_origin": "joined",
+    "ai_source_score": 100,
+    "status": "auto_active",
+    "last_seen_at": "2026-04-07T08:04:08.076099+00:00",
+    "last_crawled_at": ""
+  },
+  {
+    "label": "Nghiện AI",
+    "url": "https://www.facebook.com/groups/nghienaivietnam/",
+    "source_type": "group",
+    "discovery_origin": "joined",
+    "ai_source_score": 98,
+    "status": "auto_active",
+    "last_seen_at": "2026-04-07T08:04:08.076082+00:00",
+    "last_crawled_at": ""
+  },
+  {
+    "label": "Nghiện AI",
+    "url": "https://www.facebook.com/groups/nghienaiviet.official/",
+    "source_type": "group",
+    "discovery_origin": "joined",
+    "ai_source_score": 98,
+    "status": "auto_active",
+    "last_seen_at": "2026-04-07T08:04:08.076155+00:00",
+    "last_crawled_at": ""
+  },
+  {
+    "label": "Bình Dân Học AI",
+    "url": "https://www.facebook.com/groups/binhdanhocai/",
+    "source_type": "group",
+    "discovery_origin": "joined",
+    "ai_source_score": 96,
+    "status": "auto_active",
+    "last_seen_at": "2026-04-07T08:04:08.076168+00:00",
+    "last_crawled_at": ""
+  },
+  {
+    "label": "Claude AI Việt Nam ✅",
+    "url": "https://www.facebook.com/groups/dragonvillagem/",
+    "source_type": "group",
+    "discovery_origin": "joined",
+    "ai_source_score": 94,
+    "status": "auto_active",
+    "last_seen_at": "2026-04-07T08:04:08.076376+00:00",
+    "last_crawled_at": ""
+  },
+  {
+    "label": "Vibe Coding Việt Nam: AI Cursor Copilot Claude Replit Lovable VN, Mua Pro",
+    "url": "https://www.facebook.com/groups/namcamranh/",
+    "source_type": "group",
+    "discovery_origin": "joined",
+    "ai_source_score": 94,
+    "status": "auto_active",
+    "last_seen_at": "2026-04-07T08:04:08.076620+00:00",
+    "last_crawled_at": ""
+  },
+  {
+    "label": "Vibe Coding Việt Nam: AI Cursor Copilot Claude Replit Lovable VN, Mua Pro",
+    "url": "https://www.facebook.com/groups/3344266339057626/",
+    "source_type": "group",
+    "discovery_origin": "joined",
+    "ai_source_score": 94,
+    "status": "auto_active",
+    "last_seen_at": "2026-04-07T08:04:08.076608+00:00",
+    "last_crawled_at": ""
+  },
+  {
+    "label": "NGHIỆN Prompt - VMedia.Ai",
+    "url": "https://www.facebook.com/groups/287850622051307/",
+    "source_type": "group",
+    "discovery_origin": "joined",
+    "ai_source_score": 84,
+    "status": "auto_active",
+    "last_seen_at": "2026-04-07T08:04:08.076285+00:00",
+    "last_crawled_at": ""
+  },
+  {
+    "label": "Cộng Đồng ChatGPT Plus Việt Nam - OFFICIAL🇻🇳",
+    "url": "https://www.facebook.com/groups/1317738756799469/",
     "source_type": "group",
     "discovery_origin": "joined",
     "ai_source_score": 76,
     "status": "auto_active",
-    "last_seen_at": "2026-04-02T00:00:00+00:00",
+    "last_seen_at": "2026-04-07T08:04:08.076445+00:00",
     "last_crawled_at": ""
   },
   {
-    "label": "Việt Nguyễn AI",
-    "url": "https://www.facebook.com/vietnguyenai/",
+    "label": "Cộng Đồng OpenClaw Việt Nam",
+    "url": "https://www.facebook.com/groups/openclawvietnam/",
+    "source_type": "group",
+    "discovery_origin": "joined",
+    "ai_source_score": 76,
+    "status": "auto_active",
+    "last_seen_at": "2026-04-07T08:04:08.076271+00:00",
+    "last_crawled_at": ""
+  },
+  {
+    "label": "OpenClaw Community",
+    "url": "https://www.facebook.com/groups/1577315533418837/",
+    "source_type": "group",
+    "discovery_origin": "joined",
+    "ai_source_score": 76,
+    "status": "auto_active",
+    "last_seen_at": "2026-04-07T08:04:08.076194+00:00",
+    "last_crawled_at": ""
+  },
+  {
+    "label": "Cơm AI lo",
+    "url": "https://www.facebook.com/groups/comailo/",
+    "source_type": "group",
+    "discovery_origin": "joined",
+    "ai_source_score": 74,
+    "status": "auto_active",
+    "last_seen_at": "2026-04-07T08:04:08.076055+00:00",
+    "last_crawled_at": ""
+  },
+  {
+    "label": "HỌC VIỆN AI",
+    "url": "https://www.facebook.com/groups/hocvienaittm/",
+    "source_type": "group",
+    "discovery_origin": "joined",
+    "ai_source_score": 74,
+    "status": "auto_active",
+    "last_seen_at": "2026-04-07T08:04:08.076388+00:00",
+    "last_crawled_at": ""
+  },
+  {
+    "label": "Sống Cùng AI",
+    "url": "https://www.facebook.com/groups/hocvienaivn/",
+    "source_type": "group",
+    "discovery_origin": "joined",
+    "ai_source_score": 74,
+    "status": "auto_active",
+    "last_seen_at": "2026-04-07T08:04:08.076330+00:00",
+    "last_crawled_at": ""
+  },
+  {
+    "label": "Chat GPT - ChatGPT Plus Việt Nam",
+    "url": "https://www.facebook.com/groups/1304991797587927/",
+    "source_type": "group",
+    "discovery_origin": "joined",
+    "ai_source_score": 70,
+    "status": "auto_active",
+    "last_seen_at": "2026-04-07T08:04:08.076415+00:00",
+    "last_crawled_at": ""
+  },
+  {
+    "label": "OpenAI",
+    "url": "https://www.facebook.com/openai/",
+    "source_type": "page",
+    "discovery_origin": "followed",
+    "ai_source_score": 70,
+    "status": "auto_active",
+    "last_seen_at": "2026-04-07T08:04:11.304381+00:00",
+    "last_crawled_at": ""
+  },
+  {
+    "label": "OpenClaw Việt Nam",
+    "url": "https://www.facebook.com/groups/2700193050346256/",
+    "source_type": "group",
+    "discovery_origin": "joined",
+    "ai_source_score": 70,
+    "status": "auto_active",
+    "last_seen_at": "2026-04-07T08:04:08.076401+00:00",
+    "last_crawled_at": ""
+  },
+  {
+    "label": "OpenClaw VN",
+    "url": "https://www.facebook.com/groups/2403721346759140/",
+    "source_type": "group",
+    "discovery_origin": "joined",
+    "ai_source_score": 70,
+    "status": "auto_active",
+    "last_seen_at": "2026-04-07T08:04:08.076143+00:00",
+    "last_crawled_at": ""
+  },
+  {
+    "label": "OpenClaw VN",
+    "url": "https://www.facebook.com/groups/852586990732832/",
+    "source_type": "group",
+    "discovery_origin": "joined",
+    "ai_source_score": 70,
+    "status": "auto_active",
+    "last_seen_at": "2026-04-07T08:04:08.076207+00:00",
+    "last_crawled_at": ""
+  },
+  {
+    "label": "Meta AI",
+    "url": "https://www.facebook.com/l.php/",
     "source_type": "profile",
     "discovery_origin": "followed",
-    "ai_source_score": 61,
+    "ai_source_score": 68,
     "status": "candidate",
-    "last_seen_at": "2026-04-02T00:00:00+00:00",
+    "last_seen_at": "2026-04-07T08:04:18.385388+00:00",
+    "last_crawled_at": ""
+  },
+  {
+    "label": "m.meTậpKIkUeFfE3VR2qZrGJfluvhbZOUQWGB5Nh7ZIa4Zus0Z2X8aZkooSdretnsph5h6fae1ocl26nt1ai2Mith95la0mr9g9u0mem82u Lmh8ugr6",
+    "url": "https://www.facebook.com/following/",
+    "source_type": "profile",
+    "discovery_origin": "followed",
+    "ai_source_score": 50,
+    "status": "candidate",
+    "last_seen_at": "2026-04-07T08:04:15.212070+00:00",
+    "last_crawled_at": ""
+  },
+  {
+    "label": "Everything about Claude, Claude Code - Vietnam",
+    "url": "https://www.facebook.com/groups/everythingclaudecode/",
+    "source_type": "group",
+    "discovery_origin": "joined",
+    "ai_source_score": 48,
+    "status": "ignored",
+    "last_seen_at": "2026-04-07T08:04:08.076430+00:00",
+    "last_crawled_at": ""
+  },
+  {
+    "label": "Code toàn bug",
+    "url": "https://www.facebook.com/codetoanbug/",
+    "source_type": "page",
+    "discovery_origin": "followed",
+    "ai_source_score": 20,
+    "status": "ignored",
+    "last_seen_at": "2026-04-07T08:04:11.304322+00:00",
+    "last_crawled_at": ""
+  },
+  {
+    "label": "Meta Business Suite",
+    "url": "https://www.facebook.com/latest/",
+    "source_type": "page",
+    "discovery_origin": "followed",
+    "ai_source_score": 20,
+    "status": "ignored",
+    "last_seen_at": "2026-04-07T08:04:11.304254+00:00",
+    "last_crawled_at": ""
+  },
+  {
+    "label": "Antigravity VN 🇻🇳",
+    "url": "https://www.facebook.com/groups/antigravityvn/",
+    "source_type": "group",
+    "discovery_origin": "joined",
+    "ai_source_score": 16,
+    "status": "ignored",
+    "last_seen_at": "2026-04-07T08:04:08.076235+00:00",
+    "last_crawled_at": ""
+  },
+  {
+    "label": "Hoang Van Anh Nghia",
+    "url": "https://www.facebook.com/groups/364997627165697/",
+    "source_type": "group",
+    "discovery_origin": "joined",
+    "ai_source_score": 16,
+    "status": "ignored",
+    "last_seen_at": "2026-04-07T08:04:08.076723+00:00",
+    "last_crawled_at": ""
+  },
+  {
+    "label": "Nghiện Google V2",
+    "url": "https://www.facebook.com/groups/1221478202547693/",
+    "source_type": "group",
+    "discovery_origin": "joined",
+    "ai_source_score": 16,
+    "status": "ignored",
+    "last_seen_at": "2026-04-07T08:04:08.076250+00:00",
+    "last_crawled_at": ""
+  },
+  {
+    "label": "Nhóm của bạn",
+    "url": "https://www.facebook.com/groups/joins/",
+    "source_type": "group",
+    "discovery_origin": "joined",
+    "ai_source_score": 16,
+    "status": "ignored",
+    "last_seen_at": "2026-04-07T08:04:08.076023+00:00",
+    "last_crawled_at": ""
+  },
+  {
+    "label": "TUYỂN DỤNG IDOL LIVE & CALL TRÊN APP ĐIỆN THOẠI",
+    "url": "https://www.facebook.com/groups/2777787885841617/",
+    "source_type": "group",
+    "discovery_origin": "joined",
+    "ai_source_score": 16,
+    "status": "ignored",
+    "last_seen_at": "2026-04-07T08:04:08.076363+00:00",
+    "last_crawled_at": ""
+  },
+  {
+    "label": "Vibe Code kiếm cơm",
+    "url": "https://www.facebook.com/groups/1385451906420187/",
+    "source_type": "group",
+    "discovery_origin": "joined",
+    "ai_source_score": 16,
+    "status": "ignored",
+    "last_seen_at": "2026-04-07T08:04:08.076346+00:00",
+    "last_crawled_at": ""
+  },
+  {
+    "label": "Việc Làm Vsip Nghệ An (37)",
+    "url": "https://www.facebook.com/groups/281706192853540/",
+    "source_type": "group",
+    "discovery_origin": "joined",
+    "ai_source_score": 16,
+    "status": "ignored",
+    "last_seen_at": "2026-04-07T08:04:08.076461+00:00",
+    "last_crawled_at": ""
+  },
+  {
+    "label": "Group Vật Vờ Studio",
+    "url": "https://www.facebook.com/groups/vatvostudio/",
+    "source_type": "group",
+    "discovery_origin": "joined",
+    "ai_source_score": 0,
+    "status": "ignored",
+    "last_seen_at": "2026-04-07T08:04:08.076220+00:00",
+    "last_crawled_at": ""
+  },
+  {
+    "label": "J2TEAM",
+    "url": "https://www.facebook.com/J2TEAM1337/",
+    "source_type": "page",
+    "discovery_origin": "followed",
+    "ai_source_score": 0,
+    "status": "ignored",
+    "last_seen_at": "2026-04-07T08:04:11.304411+00:00",
+    "last_crawled_at": ""
+  },
+  {
+    "label": "J2TEAM Community",
+    "url": "https://www.facebook.com/groups/j2team.community/",
+    "source_type": "group",
+    "discovery_origin": "joined",
+    "ai_source_score": 0,
+    "status": "ignored",
+    "last_seen_at": "2026-04-07T08:04:08.076738+00:00",
+    "last_crawled_at": ""
+  },
+  {
+    "label": "J2TEAM Community 🇻🇳",
+    "url": "https://www.facebook.com/groups/j2team.community.official/",
+    "source_type": "group",
+    "discovery_origin": "joined",
+    "ai_source_score": 0,
+    "status": "ignored",
+    "last_seen_at": "2026-04-07T08:04:08.076302+00:00",
+    "last_crawled_at": ""
+  },
+  {
+    "label": "Vật Vờ Studio",
+    "url": "https://www.facebook.com/VatVoStudio69/",
+    "source_type": "page",
+    "discovery_origin": "followed",
+    "ai_source_score": 0,
+    "status": "ignored",
+    "last_seen_at": "2026-04-07T08:04:11.304354+00:00",
     "last_crawled_at": ""
   }
 ]
