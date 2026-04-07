@@ -1,11 +1,5 @@
 """
 graph.py — LangGraph StateGraph: Daily Digest AI Agent (MVP3 Speed Optimized - Fixed Routing).
-
-Flow mới:
-  gather → normalize_source → deduplicate → collect_feedback → early_rule_filter → batch_classify_and_score
-    ├─ top_articles → (Send fan-out theo chunk) → batch_deep_process
-    └─ low_score_articles → batch_quick_compose
-  → merge_processed_articles → delivery_judge → save_notion → summarize_vn → quality_gate → send_telegram → END
 """
 
 from __future__ import annotations
@@ -17,11 +11,8 @@ from langgraph.graph import StateGraph, END
 from langgraph.types import Send
 
 
-# ── State chia sẻ giữa tất cả nodes ─────────────────────────────────
 class DigestState(TypedDict, total=False):
-    """Typed state dict — mỗi node đọc/ghi vào đây."""
-
-    # (giữ nguyên toàn bộ state của bạn, không thay đổi gì)
+    # (giữ nguyên toàn bộ state của bạn, không thay đổi)
     run_mode: str
     run_profile: str
     publish_notion: bool
@@ -96,87 +87,55 @@ from nodes.send_telegram import send_telegram_node
 from nodes.generate_run_report import generate_run_report_node
 
 
-# ── Router mới (sạch sẽ + ổn định) ─────────────────────────────────
 def _chunk_top_articles_for_parallel_send(state: DigestState) -> list[Send]:
-    """Fan-out top_articles theo chunk (parallel batch_deep_process)"""
+    """Fan-out top_articles theo chunk"""
     top_articles = list(state.get("top_articles", []) or [])
     if not top_articles:
         return []
-
     runtime_config = dict(state.get("runtime_config", {}) or {})
-    chunk_size = max(1, int(runtime_config.get("batch_deep_process_chunk_size", 3) or 3))
+    chunk_size = max(1, int(runtime_config.get("batch_deep_process_chunk_size", 3)))
     sends: list[Send] = []
-    for index in range(0, len(top_articles), chunk_size):
-        sends.append(
-            Send(
-                "batch_deep_process",
-                {
-                    "top_articles": top_articles[index : index + chunk_size],
-                    "runtime_config": runtime_config,
-                    "run_profile": state.get("run_profile", ""),
-                },
-            )
-        )
+    for i in range(0, len(top_articles), chunk_size):
+        sends.append(Send("batch_deep_process", {
+            "top_articles": top_articles[i:i+chunk_size],
+            "runtime_config": runtime_config,
+            "run_profile": state.get("run_profile", ""),
+        }))
     return sends
 
 
 def _route_batch_after_classify(state: DigestState) -> list[Send]:
-    """
-    // MVP3 Speed Optimized - Batch + Parallel
-    Router sạch sẽ: fan-out cả 2 nhánh song song
-    - top_articles → batch_deep_process (parallel chunks)
-    - low_score_articles → batch_quick_compose
-    """
-    sends: list[Send] = []
-
-    # 1. Top articles → parallel deep process
-    sends.extend(_chunk_top_articles_for_parallel_send(state))
-
-    # 2. Low score articles → quick compose (luôn chạy song song)
+    """MVP3 Speed Optimized - Batch + Parallel"""
+    sends: list[Send] = _chunk_top_articles_for_parallel_send(state)
     low_articles = list(state.get("low_score_articles", []) or [])
     if low_articles:
-        sends.append(
-            Send(
-                "batch_quick_compose",
-                {
-                    "low_score_articles": low_articles,
-                    "runtime_config": dict(state.get("runtime_config", {}) or {}),
-                },
-            )
-        )
+        sends.append(Send("batch_quick_compose", {
+            "low_score_articles": low_articles,
+            "runtime_config": dict(state.get("runtime_config", {}) or {}),
+        }))
     return sends
 
 
 def _merge_processed_articles_node(state: DigestState) -> dict[str, Any]:
-    """// MVP3 Speed Optimized - Batch + Parallel"""
+    """Merge sạch sẽ"""
     analyzed = list(state.get("analyzed_articles", []) or [])
     low = list(state.get("low_score_articles", []) or [])
-
     merged = []
     seen = set()
-    for article in analyzed + low:
-        key = str(article.get("url") or article.get("title") or id(article))
-        if key in seen:
-            continue
+    for a in analyzed + low:
+        key = str(a.get("url") or a.get("title") or id(a))
+        if key in seen: continue
         seen.add(key)
-        merged.append(article)
-
+        merged.append(a)
     if not merged:
         merged = list(state.get("scored_articles", []) or [])
-
-    merged.sort(key=lambda a: int(a.get("total_score", 0) or 0), reverse=True)
-
-    return {
-        "analyzed_articles": analyzed,
-        "final_articles": merged,
-    }
+    merged.sort(key=lambda x: int(x.get("total_score", 0)), reverse=True)
+    return {"analyzed_articles": analyzed, "final_articles": merged}
 
 
 def build_graph() -> StateGraph:
-    """MVP3 Speed Optimized - Fixed Routing"""
     graph = StateGraph(DigestState)
 
-    # Nodes
     graph.add_node("gather", gather_news_node)
     graph.add_node("normalize_source", normalize_source_node)
     graph.add_node("deduplicate", deduplicate_node)
@@ -193,7 +152,6 @@ def build_graph() -> StateGraph:
     graph.add_node("send_telegram", send_telegram_node)
     graph.add_node("generate_run_report", generate_run_report_node)
 
-    # Edges
     graph.set_entry_point("gather")
     graph.add_edge("gather", "normalize_source")
     graph.add_edge("normalize_source", "deduplicate")
@@ -201,13 +159,7 @@ def build_graph() -> StateGraph:
     graph.add_edge("collect_feedback", "early_rule_filter")
     graph.add_edge("early_rule_filter", "batch_classify_and_score")
 
-    # ← Routing chính (sạch nhất)
-    graph.add_conditional_edges(
-        "batch_classify_and_score",
-        _route_batch_after_classify,
-        # Không cần path map vì dùng Send
-    )
-
+    graph.add_conditional_edges("batch_classify_and_score", _route_batch_after_classify)
     graph.add_edge("batch_deep_process", "merge_processed_articles")
     graph.add_edge("batch_quick_compose", "merge_processed_articles")
     graph.add_edge("merge_processed_articles", "delivery_judge")
