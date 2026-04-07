@@ -44,5 +44,6 @@ mkdir -p "$OUTPUT_DIR"
 
 render_diagram "system_overview"
 render_diagram "execution_flow"
+render_diagram "simplified_system_flow_vi"
 
 echo "Exported architecture diagrams to $OUTPUT_DIR"

@@ -54,7 +54,10 @@ class MVP3SpeedOptimizedTest(unittest.TestCase):
                         "c3_score": 18,
                         "c3_reason": "fit",
                         "summary_vi": "OpenAI công bố SDK agent mới cho enterprise workflows.",
+                        "factual_summary_vi": "OpenAI công bố SDK agent mới cho workflow enterprise.",
                         "editorial_angle": "SDK này có thể giúp team tăng tốc triển khai agent.",
+                        "why_it_matters_vi": "Đội build agent có thêm primitive để triển khai production nhanh hơn.",
+                        "optional_editorial_angle": "Tín hiệu tích cực cho builder workflow.",
                         "analysis_tier": "deep",
                         "tags": ["api_platform"],
                         "relevance_level": "High",
@@ -98,7 +101,64 @@ class MVP3SpeedOptimizedTest(unittest.TestCase):
         self.assertEqual(result["top_articles"][0]["base_total_score"], 56)
         self.assertGreaterEqual(result["top_articles"][0]["adjusted_total_score"], 56)
         self.assertIn("applied_adjustments", result["top_articles"][0]["score_breakdown"])
+        self.assertEqual(result["top_articles"][0]["classify_json_status"], "valid_json")
+        self.assertTrue(result["top_articles"][0]["factual_summary_vi"])
+        self.assertTrue(result["top_articles"][0]["why_it_matters_vi"])
+        self.assertTrue(result["top_articles"][0]["optional_editorial_angle"])
         self.assertEqual(result["scored_snapshot_path"], "reports/mock.json")
+
+    @patch("digest.workflow.nodes.batch_classify_and_score_node.write_temporal_snapshot", return_value="reports/mock.json")
+    @patch(
+        "digest.workflow.nodes.batch_classify_and_score_node.run_json_inference_meta",
+        return_value=(
+            None,
+            """```json
+            {articles: [{item_id: 'article_0', primary_type: 'Product', primary_emoji: '🚀', c1_score: 20, c1_reason: 'fresh',
+            c2_score: 18, c2_reason: 'useful', c3_score: 18, c3_reason: 'fit',
+            summary_vi: 'OpenAI công bố SDK agent mới cho enterprise workflows.',
+            factual_summary_vi: 'OpenAI công bố SDK agent mới cho workflow enterprise.',
+            editorial_angle: 'SDK này có thể giúp team tăng tốc triển khai agent.',
+            why_it_matters_vi: 'Đội build agent có thêm primitive để triển khai production nhanh hơn.',
+            optional_editorial_angle: 'Tín hiệu tích cực cho builder workflow.',
+            analysis_tier: 'deep', tags: ['api_platform'], relevance_level: 'High'}]}
+            ```""",
+            True,
+        ),
+    )
+    def test_batch_classify_recovers_malformed_batch_json(self, _mock_infer, _mock_snapshot) -> None:
+        state = {
+            "filtered_articles": [
+                {
+                    "title": "OpenAI launches new agent SDK",
+                    "url": "https://example.com/a",
+                    "source": "OpenAI",
+                    "source_domain": "openai.com",
+                    "source_tier": "a",
+                    "source_kind": "official",
+                    "source_verified": True,
+                    "content_available": True,
+                    "content": "A new SDK for building production agents.",
+                    "snippet": "A new SDK for building production agents.",
+                    "published_at": "2026-04-06T00:00:00+00:00",
+                    "published_at_source": "source_metadata",
+                    "freshness_bucket": "fresh",
+                    "is_ai_relevant": True,
+                    "event_is_primary": True,
+                }
+            ],
+            "runtime_config": {"max_classify_articles": 5, "max_deep_analysis_articles": 3},
+            "feedback_summary_text": "",
+            "feedback_preference_profile": {},
+        }
+
+        result = batch_classify_and_score_node(state)
+
+        self.assertEqual(len(result["scored_articles"]), 1)
+        self.assertEqual(result["scored_articles"][0]["classify_json_status"], "repaired_json")
+        self.assertEqual(
+            result["scored_articles"][0]["why_it_matters_vi"],
+            "Đội build agent có thêm primitive để triển khai production nhanh hơn.",
+        )
 
     @patch(
         "digest.workflow.nodes.batch_deep_process_node.run_json_inference_meta",

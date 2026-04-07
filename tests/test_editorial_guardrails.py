@@ -27,6 +27,7 @@ from pipeline_runner import build_initial_state, publish_from_preview_state, pub
 from digest.runtime.run_health import assess_run_health, collect_source_health
 from digest.runtime.runtime_presets import apply_runtime_preset
 from digest.runtime.mlx_runner import run_json_inference
+from digest.runtime.stage_metrics import summarize_stage_timings
 from digest.runtime.artifact_retention import cleanup_runtime_artifacts
 from scripts.github_agent_brief import _group_github_articles
 from scripts.weekly_memo import build_weekly_memo
@@ -41,6 +42,7 @@ from digest.workflow.nodes.classify_and_score import (
     _apply_freshness_penalty,
     _articles_same_event,
     _classify_inference_with_retry,
+    classify_and_score_node,
     _finalize_scored_article,
     _held_out_article_fallback,
     _select_top_articles,
@@ -712,7 +714,7 @@ class EditorialGuardrailsTest(unittest.TestCase):
 
     @patch("digest.workflow.nodes.delivery_judge.grok_delivery_enabled", return_value=False)
     @patch("digest.workflow.nodes.delivery_judge.run_json_inference")
-    def test_delivery_judge_routes_github_articles_to_github_topic(self, mock_judge, *_mocks) -> None:
+    def test_delivery_judge_keeps_generic_github_articles_out_of_main_brief(self, mock_judge, *_mocks) -> None:
         mock_judge.return_value = {
             "groundedness_score": 4,
             "freshness_score": 4,
@@ -728,8 +730,11 @@ class EditorialGuardrailsTest(unittest.TestCase):
                         "title": "Anthropic ships new enterprise admin controls",
                         "source": "RSS: TechCrunch",
                         "source_domain": "techcrunch.com",
+                        "source_kind": "strong_media",
                         "primary_type": "Product",
                         "total_score": 78,
+                        "relevance_level": "High",
+                        "tags": ["product_update", "enterprise_ai", "api_platform"],
                         "content_available": True,
                         "source_verified": True,
                         "source_tier": "a",
@@ -761,13 +766,14 @@ class EditorialGuardrailsTest(unittest.TestCase):
             }
         )
 
-        self.assertEqual(len(result["telegram_candidates"]), 2)
+        self.assertEqual(len(result["telegram_candidates"]), 1)
         self.assertEqual(result["telegram_candidates"][0]["source_domain"], "techcrunch.com")
-        self.assertTrue(any(item.get("github_full_name") == "openai/openai-agents-python" for item in result["telegram_candidates"]))
+        github_article = next(item for item in result["final_articles"] if item.get("source_domain") == "github.com")
+        self.assertEqual(github_article["delivery_lane_candidate"], "github")
 
     @patch("digest.workflow.nodes.delivery_judge.grok_delivery_enabled", return_value=False)
     @patch("digest.workflow.nodes.delivery_judge.run_json_inference")
-    def test_delivery_judge_routes_x_discovered_github_repo_to_github_topic(self, mock_judge, *_mocks) -> None:
+    def test_delivery_judge_keeps_x_discovered_github_repo_out_of_main_brief(self, mock_judge, *_mocks) -> None:
         mock_judge.return_value = {
             "groundedness_score": 4,
             "freshness_score": 4,
@@ -783,8 +789,11 @@ class EditorialGuardrailsTest(unittest.TestCase):
                         "title": "Anthropic ships new enterprise admin controls",
                         "source": "RSS: TechCrunch",
                         "source_domain": "techcrunch.com",
+                        "source_kind": "strong_media",
                         "primary_type": "Product",
                         "total_score": 78,
+                        "relevance_level": "High",
+                        "tags": ["product_update", "enterprise_ai", "api_platform"],
                         "content_available": True,
                         "source_verified": True,
                         "source_tier": "a",
@@ -817,10 +826,11 @@ class EditorialGuardrailsTest(unittest.TestCase):
             }
         )
 
-        self.assertEqual(len(result["telegram_candidates"]), 2)
+        self.assertEqual(len(result["telegram_candidates"]), 1)
         self.assertEqual(result["telegram_candidates"][0]["source_domain"], "techcrunch.com")
-        self.assertTrue(any(item.get("source_domain") == "github.com" for item in result["telegram_candidates"]))
-        self.assertTrue(any(item.get("source") == "Grok X Scout: builder-posts | @OpenAIDevs" for item in result["telegram_candidates"]))
+        github_article = next(item for item in result["final_articles"] if item.get("source_domain") == "github.com")
+        self.assertEqual(github_article["delivery_lane_candidate"], "github")
+        self.assertEqual(github_article["source"], "Grok X Scout: builder-posts | @OpenAIDevs")
 
     @patch("digest.workflow.nodes.delivery_judge.grok_delivery_enabled", return_value=False)
     @patch("digest.workflow.nodes.delivery_judge.run_json_inference")
@@ -912,7 +922,13 @@ class EditorialGuardrailsTest(unittest.TestCase):
     @patch("digest.workflow.nodes.delivery_judge.grok_delivery_enabled", return_value=False)
     @patch("digest.workflow.nodes.delivery_judge.run_json_inference")
     def test_delivery_judge_includes_fresh_facebook_benchmark_post(self, mock_judge, *_mocks) -> None:
-        mock_judge.return_value = {}
+        mock_judge.return_value = {
+            "groundedness_score": 4,
+            "freshness_score": 4,
+            "operator_value_score": 4,
+            "decision": "include",
+            "rationale": "Benchmark này đủ mạnh để đưa vào brief.",
+        }
 
         result = delivery_judge_node(
             {
@@ -973,8 +989,11 @@ class EditorialGuardrailsTest(unittest.TestCase):
                         "title": "Product A",
                         "source": "RSS: Example",
                         "source_domain": "example.com",
+                        "source_kind": "strong_media",
                         "primary_type": "Product",
                         "total_score": 82,
+                        "relevance_level": "High",
+                        "tags": ["api_platform", "enterprise_ai", "product_update"],
                         "content_available": True,
                         "source_verified": True,
                         "source_tier": "a",
@@ -989,8 +1008,11 @@ class EditorialGuardrailsTest(unittest.TestCase):
                         "title": "Product B",
                         "source": "RSS: Example",
                         "source_domain": "example.com",
+                        "source_kind": "strong_media",
                         "primary_type": "Product",
                         "total_score": 79,
+                        "relevance_level": "High",
+                        "tags": ["api_platform", "enterprise_ai", "product_update"],
                         "content_available": True,
                         "source_verified": True,
                         "source_tier": "a",
@@ -1005,8 +1027,11 @@ class EditorialGuardrailsTest(unittest.TestCase):
                         "title": "Business A",
                         "source": "RSS: Example",
                         "source_domain": "example.com",
-                        "primary_type": "Business",
+                        "source_kind": "strong_media",
+                        "primary_type": "Practical",
                         "total_score": 74,
+                        "relevance_level": "High",
+                        "tags": ["developer_tools", "ai_agents", "enterprise_ai"],
                         "content_available": True,
                         "source_verified": True,
                         "source_tier": "a",
@@ -2079,6 +2104,40 @@ class EditorialGuardrailsTest(unittest.TestCase):
         self.assertIn("## Grok Source Gap Suggestions", markdown)
         self.assertIn("OpenAI enterprise updates", markdown)
         self.assertIn("OpenAI newsroom/blog", markdown)
+
+    def test_build_run_report_markdown_includes_performance_section(self) -> None:
+        state = {
+            "run_mode": "preview",
+            "raw_articles": [{"title": "A", "source": "RSS: Example", "source_domain": "example.com"}],
+            "new_articles": [{"title": "A"}],
+            "filtered_articles": [{"title": "A", "content": "x" * 1400, "snippet": "short"}],
+            "scored_articles": [{"title": "A"} for _ in range(12)],
+            "top_articles": [
+                {
+                    "title": "Top article",
+                    "content": "x" * 2400,
+                    "factual_summary_vi": "Structured summary",
+                    "why_it_matters_vi": "Structured why",
+                }
+            ],
+            "telegram_candidates": [{"title": "Main 1"}, {"title": "Main 2"}],
+            "stage_timings": [
+                {"stage": "gather", "duration_ms": 120.0, "input_count": 0, "output_count": 24},
+                {"stage": "batch_classify_and_score", "duration_ms": 1800.0, "input_count": 20, "output_count": 12},
+                {"stage": "batch_deep_process", "duration_ms": 2200.0, "input_count": 3, "output_count": 3},
+                {"stage": "batch_deep_process", "duration_ms": 2100.0, "input_count": 2, "output_count": 2},
+                {"stage": "send_telegram", "duration_ms": 420.0, "input_count": 2, "output_count": 2},
+            ],
+        }
+        state["performance_report"] = summarize_stage_timings(list(state["stage_timings"]), state)
+
+        markdown = _build_run_report_markdown(state, datetime(2026, 3, 27, tzinfo=timezone.utc))
+
+        self.assertIn("## Performance", markdown)
+        self.assertIn("### Slowest stages", markdown)
+        self.assertIn("batch_deep_process", markdown)
+        self.assertIn("Token-waste hotspots", markdown)
+        self.assertIn("Future parallelization opportunities", markdown)
 
     def test_build_run_report_markdown_includes_facebook_discovery_and_skip_breakdown(self) -> None:
         state = {
@@ -3403,7 +3462,7 @@ class EditorialGuardrailsTest(unittest.TestCase):
         self.assertEqual(mock_run_json.call_count, 2)
 
     @patch("digest.workflow.nodes.classify_and_score.run_json_inference")
-    def test_classify_inference_skips_retry_for_clear_prose(self, mock_run_json) -> None:
+    def test_classify_inference_retries_for_clear_prose_before_giving_up(self, mock_run_json) -> None:
         mock_run_json.return_value = (
             None,
             "Đây là một bài cập nhật sản phẩm AI cho doanh nghiệp. Điểm đáng chú ý là nó phù hợp để theo dõi thêm trong brief sáng nay. Tuy nhiên model đang trả prose thay vì JSON.",
@@ -3413,7 +3472,7 @@ class EditorialGuardrailsTest(unittest.TestCase):
         result = _classify_inference_with_retry("prompt body", max_tokens=320, temperature=0.1)
 
         self.assertIsNone(result)
-        self.assertEqual(mock_run_json.call_count, 1)
+        self.assertEqual(mock_run_json.call_count, 3)
 
     @patch("digest.workflow.nodes.classify_and_score.run_json_inference")
     def test_classify_inference_reuses_initial_failed_response_without_duplicate_first_call(self, mock_run_json) -> None:
@@ -3439,7 +3498,202 @@ class EditorialGuardrailsTest(unittest.TestCase):
 
         self.assertIsNotNone(result)
         self.assertEqual(result["primary_type"], "Business")
-        self.assertEqual(mock_run_json.call_count, 1)
+        self.assertEqual(mock_run_json.call_count, 0)
+
+    @patch("digest.workflow.nodes.classify_and_score.write_temporal_snapshot", return_value="reports/mock.json")
+    @patch("digest.workflow.nodes.classify_and_score.run_json_inference")
+    def test_classify_node_keeps_valid_structured_json(self, mock_run_json, _mock_snapshot) -> None:
+        mock_run_json.return_value = {
+            "primary_type": "Product",
+            "primary_emoji": "🚀",
+            "c1_score": 24,
+            "c1_reason": "Nguồn mạnh và dữ kiện rõ.",
+            "c2_score": 22,
+            "c2_reason": "Có ích cho team build sản phẩm AI.",
+            "c3_score": 20,
+            "c3_reason": "Fit với hướng agent workflow.",
+            "summary_vi": "OpenAI công bố API orchestration mới cho agent workflows.",
+            "factual_summary_vi": "OpenAI công bố API orchestration mới cho workflow nhiều bước.",
+            "editorial_angle": "Đây là cập nhật platform đáng theo dõi cho builder.",
+            "why_it_matters_vi": "Nó giúp đội vận hành agent có thêm primitive để kiểm soát flow.",
+            "optional_editorial_angle": "Tín hiệu cho các team đang productize agent.",
+            "analysis_tier": "deep",
+            "tags": ["api_platform", "ai_agents"],
+            "relevance_level": "High",
+        }
+
+        result = classify_and_score_node(
+            {
+                "new_articles": [
+                    {
+                        "title": "OpenAI launches orchestration API for agents",
+                        "url": "https://example.com/a",
+                        "source": "OpenAI",
+                        "source_domain": "openai.com",
+                        "source_tier": "a",
+                        "source_kind": "official",
+                        "source_verified": True,
+                        "content_available": True,
+                        "content": "OpenAI launched a new orchestration API for agent workflows.",
+                        "snippet": "OpenAI launched a new orchestration API for agent workflows.",
+                        "published_at": "2026-04-06T00:00:00+00:00",
+                        "published_at_source": "source_metadata",
+                        "freshness_bucket": "fresh",
+                        "is_ai_relevant": True,
+                        "event_is_primary": True,
+                    }
+                ],
+                "runtime_config": {"max_classify_articles": 5, "max_deep_analysis_articles": 3},
+                "feedback_summary_text": "",
+                "feedback_preference_profile": {},
+            }
+        )
+
+        article = result["scored_articles"][0]
+        self.assertEqual(article["classify_json_status"], "valid_json")
+        self.assertEqual(article["factual_summary_vi"], "OpenAI công bố API orchestration mới cho workflow nhiều bước.")
+        self.assertEqual(article["why_it_matters_vi"], "Nó giúp đội vận hành agent có thêm primitive để kiểm soát flow.")
+        self.assertEqual(article["optional_editorial_angle"], "Tín hiệu cho các team đang productize agent.")
+        self.assertNotIn("classify hiện tại không trả JSON ổn định", article["summary_vi"])
+
+    @patch("digest.workflow.nodes.classify_and_score.write_temporal_snapshot", return_value="reports/mock.json")
+    @patch("digest.workflow.nodes.classify_and_score.run_json_inference")
+    def test_classify_node_repairs_malformed_json_output(self, mock_run_json, _mock_snapshot) -> None:
+        mock_run_json.return_value = (
+            None,
+            """```json
+            {primary_type: 'Product', primary_emoji: '🚀', c1_score: 21, c1_reason: 'fresh', c2_score: 20, c2_reason: 'useful',
+            c3_score: 18, c3_reason: 'fit', summary_vi: 'OpenAI ra mắt API agent mới.', factual_summary_vi: 'OpenAI ra mắt API agent mới cho workflow agent.',
+            editorial_angle: 'Đây là cập nhật platform.', why_it_matters_vi: 'Nó giúp team build agent thực chiến nhanh hơn.',
+            optional_editorial_angle: 'Tín hiệu tốt cho builder.', analysis_tier: 'deep', tags: ['api_platform', 'ai_agents'], relevance_level: 'High',}
+            ```""",
+            True,
+        )
+
+        result = classify_and_score_node(
+            {
+                "new_articles": [
+                    {
+                        "title": "OpenAI launches agent API",
+                        "url": "https://example.com/b",
+                        "source": "OpenAI",
+                        "source_domain": "openai.com",
+                        "source_tier": "a",
+                        "source_kind": "official",
+                        "source_verified": True,
+                        "content_available": True,
+                        "content": "OpenAI launched a new API for agents.",
+                        "snippet": "OpenAI launched a new API for agents.",
+                        "published_at": "2026-04-06T00:00:00+00:00",
+                        "published_at_source": "source_metadata",
+                        "freshness_bucket": "fresh",
+                        "is_ai_relevant": True,
+                        "event_is_primary": True,
+                    }
+                ],
+                "runtime_config": {"max_classify_articles": 5, "max_deep_analysis_articles": 3},
+                "feedback_summary_text": "",
+                "feedback_preference_profile": {},
+            }
+        )
+
+        article = result["scored_articles"][0]
+        self.assertEqual(article["classify_json_status"], "repaired_json")
+        self.assertEqual(article["factual_summary_vi"], "OpenAI ra mắt API agent mới cho workflow agent.")
+        self.assertEqual(article["why_it_matters_vi"], "Nó giúp team build agent thực chiến nhanh hơn.")
+
+    @patch("digest.workflow.nodes.classify_and_score.write_temporal_snapshot", return_value="reports/mock.json")
+    @patch("digest.workflow.nodes.classify_and_score.run_json_inference")
+    def test_classify_node_recovers_missing_structured_fields(self, mock_run_json, _mock_snapshot) -> None:
+        mock_run_json.return_value = {
+            "primary_type": "Product",
+            "primary_emoji": "🚀",
+            "c1_score": 22,
+            "c1_reason": "fresh",
+            "c2_score": 21,
+            "c2_reason": "useful",
+            "c3_score": 19,
+            "c3_reason": "fit",
+            "summary_vi": "Anthropic cập nhật pricing cho Claude Code.",
+            "editorial_angle": "Đây là thay đổi có tác động trực tiếp tới operator.",
+            "analysis_tier": "deep",
+            "tags": ["api_platform"],
+            "relevance_level": "High",
+        }
+
+        result = classify_and_score_node(
+            {
+                "new_articles": [
+                    {
+                        "title": "Anthropic updates Claude Code pricing",
+                        "url": "https://example.com/c",
+                        "source": "Anthropic",
+                        "source_domain": "anthropic.com",
+                        "source_tier": "a",
+                        "source_kind": "official",
+                        "source_verified": True,
+                        "content_available": True,
+                        "content": "Anthropic updated Claude Code pricing for operators.",
+                        "snippet": "Anthropic updated Claude Code pricing for operators.",
+                        "published_at": "2026-04-06T00:00:00+00:00",
+                        "published_at_source": "source_metadata",
+                        "freshness_bucket": "fresh",
+                        "is_ai_relevant": True,
+                        "event_is_primary": True,
+                    }
+                ],
+                "runtime_config": {"max_classify_articles": 5, "max_deep_analysis_articles": 3},
+                "feedback_summary_text": "",
+                "feedback_preference_profile": {},
+            }
+        )
+
+        article = result["scored_articles"][0]
+        self.assertEqual(article["classify_json_status"], "partial_recovery")
+        self.assertEqual(article["factual_summary_vi"], "Anthropic cập nhật pricing cho Claude Code.")
+        self.assertEqual(article["why_it_matters_vi"], "Đây là thay đổi có tác động trực tiếp tới operator.")
+        self.assertEqual(article["optional_editorial_angle"], "Đây là thay đổi có tác động trực tiếp tới operator.")
+        self.assertIn("factual_summary_vi", article["classify_json_missing_fields"])
+
+    @patch("digest.workflow.nodes.classify_and_score.write_temporal_snapshot", return_value="reports/mock.json")
+    @patch("digest.workflow.nodes.classify_and_score.run_json_inference")
+    def test_classify_node_marks_hard_fallback_when_json_cannot_be_recovered(self, mock_run_json, _mock_snapshot) -> None:
+        mock_run_json.side_effect = [
+            (None, "", False),
+            (None, "", False),
+            (None, "", False),
+        ]
+
+        result = classify_and_score_node(
+            {
+                "new_articles": [
+                    {
+                        "title": "Unknown AI update",
+                        "url": "https://example.com/d",
+                        "source": "Blog",
+                        "source_domain": "example.com",
+                        "source_tier": "b",
+                        "source_kind": "unknown",
+                        "source_verified": False,
+                        "content_available": True,
+                        "content": "Some AI update.",
+                        "snippet": "Some AI update.",
+                        "published_at": "2026-04-06T00:00:00+00:00",
+                        "published_at_source": "source_metadata",
+                        "freshness_bucket": "fresh",
+                        "is_ai_relevant": True,
+                        "event_is_primary": True,
+                    }
+                ],
+                "runtime_config": {"max_classify_articles": 5, "max_deep_analysis_articles": 3},
+                "feedback_summary_text": "",
+                "feedback_preference_profile": {},
+            }
+        )
+
+        article = result["scored_articles"][0]
+        self.assertEqual(article["classify_json_status"], "hard_fallback")
+        self.assertIn("classify hiện tại không trả JSON ổn định", article["summary_vi"])
 
     def test_held_out_article_fallback_avoids_title_token_garbage_tags(self) -> None:
         article = {
@@ -3766,19 +4020,24 @@ class EditorialGuardrailsTest(unittest.TestCase):
     @patch("digest.workflow.nodes.delivery_judge.grok_final_editor_enabled", return_value=False)
     @patch("digest.workflow.nodes.delivery_judge.grok_delivery_enabled", return_value=False)
     @patch("digest.workflow.nodes.delivery_judge.run_json_inference", return_value=None)
-    def test_delivery_judge_keeps_all_include_candidates_without_hard_cap(self, _mock_run_json, *_mocks) -> None:
+    def test_delivery_judge_caps_main_brief_candidates_to_six_items(self, _mock_run_json, *_mocks) -> None:
         final_articles = [
             {
                 "title": f"Main article {idx}",
                 "url": f"https://example.com/main-{idx}",
                 "primary_type": "Product",
-                "note_summary_vi": f"OpenAI vừa mở thêm capability số {idx}.",
+                "note_summary_vi": (
+                    f"OpenAI vừa mở thêm capability số {idx} cho API enterprise, hỗ trợ workflow agent "
+                    "và rollout vận hành tốt hơn cho team AI."
+                ),
                 "total_score": 80,
                 "source": "RSS: Example",
                 "source_domain": "example.com",
+                "source_kind": "strong_media",
                 "source_tier": "a",
                 "content_available": True,
                 "source_verified": True,
+                "tags": ["api_platform", "enterprise_ai", "ai_agents"],
                 "freshness_unknown": False,
                 "is_stale_candidate": False,
                 "event_is_primary": True,
@@ -3790,7 +4049,7 @@ class EditorialGuardrailsTest(unittest.TestCase):
 
         result = delivery_judge_node({"final_articles": final_articles, "runtime_config": {}})
 
-        self.assertEqual(len(result["telegram_candidates"]), 14)
+        self.assertEqual(len(result["telegram_candidates"]), 5)
 
     @patch("mlx_runner.run_inference", return_value="""```json
 {'primary_type': 'Product', 'c1_score': 12, 'tags': ['ai',], 'analysis_tier': 'basic'}

@@ -12,6 +12,7 @@ Mermaid source of truth hiện nằm ở:
 
 - [docs/assets/system_overview.svg](./assets/system_overview.svg)
 - [docs/assets/execution_flow.svg](./assets/execution_flow.svg)
+- [docs/assets/simplified_system_flow_vi.svg](./assets/simplified_system_flow_vi.svg)
 
 ### 1.1. System Overview
 
@@ -20,6 +21,10 @@ Mermaid source of truth hiện nằm ở:
 ### 1.2. Execution Flow
 
 ![Execution flow](./assets/execution_flow.svg)
+
+### 1.3. Simplified System Flow (VN)
+
+![Simplified system flow](./assets/simplified_system_flow_vi.svg)
 
 ## 2. Kiến trúc cấp cao
 
@@ -44,6 +49,9 @@ Support modules không còn nằm phẳng ở root. Chúng đã được gom và
 - `delivery chính thức` hiện là main Telegram brief, không còn GitHub lane hay Facebook lane như một đường publish độc lập trong flow chính.
 - `preview` chạy cùng backbone logic với `publish`, nhưng tắt các cờ ghi/publish ở đầu ra.
 - `Approve Preview` không regather hay rescore lại từ đầu; nó publish từ đúng `preview_state` đã review.
+- `scoring/reporting` tách rõ `base_total_score` và `adjusted_total_score`; mọi điều chỉnh điểm đều được log để report không còn ngầm hiểu `c1/c2/c3` luôn bằng điểm hiển thị cuối.
+- `classification` hiện làm `structured judgement + scoring`, không còn là lớp viết Telegram cuối cùng.
+- `Grok` chỉ là lớp polish/rerank tùy chọn ở vài chỗ cuối; pipeline vẫn phải chạy ổn với deterministic fallback.
 
 ## 3. Entry points và orchestration
 
@@ -218,11 +226,20 @@ File chính:
 Nhiệm vụ:
 
 - batch classify nhiều bài trong một lần gọi MLX
-- chấm điểm, normalize type/tag, build score breakdown
+- tạo `structured judgement` cho downstream: type, tags, factual summary, why-it-matters, editorial angle
+- chấm `base_total_score` từ `c1/c2/c3`, rồi áp các điều chỉnh deterministic để ra `adjusted_total_score`
+- log rõ `score_adjustment_total` và `applied_adjustments` trong article/report payload
+- normalize type/tag, build score breakdown
 - tách `top_articles` và `low_score_articles`
 - ghi temporal snapshot sau scoring
 
-Đây là node thay thế flow classify đơn chiếc cũ bằng routing theo batch.
+Điểm quan trọng về mặt reporting:
+
+- `c1/c2/c3` vẫn giải thích `base judgement` của model.
+- điểm hiển thị cuối trong report/UI thường là `adjusted_total_score`, không phải lúc nào cũng bằng tổng cơ học của `c1/c2/c3`.
+- việc log điều chỉnh rõ ràng giúp PM, operator và engineer debug vì sao một bài được đẩy lên hoặc hạ xuống.
+
+Đây là node thay thế flow classify đơn chiếc cũ bằng routing theo batch, và vai trò chính của nó giờ là `triage + structured scoring`, không phải final newsletter writing.
 
 ### 4.7. `batch_deep_process`
 
@@ -263,7 +280,7 @@ Nhiệm vụ:
 
 - merge kết quả từ nhánh `batch_deep_process` và `batch_quick_compose`
 - loại duplicate
-- sort lại theo `total_score`
+- sort lại theo `total_score` hiện hành, tức score đang được downstream dùng để display/rank sau các adjustment
 - build `final_articles`
 
 Đây là điểm hợp nhất fan-out quan trọng nhất trong graph hiện tại.
@@ -279,8 +296,19 @@ File chính:
 Nhiệm vụ:
 
 - chọn bài nào đủ mạnh để vào `telegram_candidates`
-- áp heuristics về freshness, source quality, event duplication, founder lens
-- optionally dùng Grok cho shortlist cuối nếu được bật
+- áp heuristics về freshness, source quality, event duplication, operator value, ecosystem impact
+- ưu tiên shortlist chất lượng cao thay vì cố lấp đầy brief
+- optionally dùng Grok cho shortlist cuối nếu được bật, nhưng deterministic policy vẫn là backbone chính
+
+#### Main Brief Selection Philosophy
+
+Main brief hiện vận hành theo triết lý `quality-first`, không phải `score-first` thuần túy:
+
+- mục tiêu là chọn một brief ngắn nhưng đáng đọc, thay vì lấy đủ chỗ cho đủ lane.
+- khi có lựa chọn tương đương, hệ ưu tiên `official` và `strong_media` trước các nguồn proxy/regional recap.
+- bài `Society & Culture` yếu, mang tính reflection/filler, hoặc ít giá trị vận hành sẽ bị đẩy ra khỏi main brief.
+- bài từ `GitHub` chỉ vào main brief khi có tác động hệ sinh thái/adoption rõ ràng; repo/tool generic nên ở lane theo dõi, không chiếm slot bản tin chính.
+- main brief được cap ở `6 items`, nên selection được ép phải chọn lọc thay vì padding.
 
 ### 4.11. `save_notion`
 
@@ -302,8 +330,17 @@ File chính:
 Nhiệm vụ:
 
 - dựng `telegram_messages` từ `telegram_candidates`
+- build final Telegram copy từ các `structured fields` đã được tạo ở bước classify/process trước đó
 - chỉ render lane có bài thật trong main brief
-- fallback sang safe summary khi batch mỏng hoặc formatter không đủ dữ liệu
+- có deterministic construction path và fallback sang safe summary khi batch mỏng hoặc formatter không đủ dữ liệu
+- nếu được bật, Grok chỉ đóng vai trò `optional polish` cho một shortlist nhỏ; nếu tắt hoặc fail thì brief vẫn được dựng bình thường
+
+Điểm cần chốt:
+
+- `classify` không còn là lớp viết final Telegram brief.
+- `classify` tạo factual judgement có cấu trúc để bước sau dựng copy.
+- `summarize_vn` mới là nơi copy Telegram được assemble.
+- `Grok` không phải primary writer; nó chỉ polish/rerank phần cuối khi runtime cho phép.
 
 ### 4.13. `quality_gate`
 
@@ -342,8 +379,11 @@ Nhiệm vụ:
 
 - xuất báo cáo markdown hậu kiểm
 - tính `run_health` và `publish_ready`
+- phản ánh rõ `base_total_score`, `adjusted_total_score`, `score_adjustment_total`, `applied_adjustments`
 - ghi/nhặt temporal snapshots
 - archive artefacts cũ theo retention rules
+
+Phần reporting này đặc biệt quan trọng vì nó tăng `trust + debuggability`: người review có thể thấy bài nào mạnh từ gốc, bài nào được boost/penalty sau rule, và vì sao điểm cuối khác với tổng component score ban đầu.
 
 ## 5. State, storage và artefacts
 
@@ -379,6 +419,12 @@ Repo hiện có một lớp artefact quản trị riêng:
 - snapshots JSON cho gather/scoring
 - archive runtime trong `.runtime_archive/`
 - cleanup policy qua `digest/runtime/artifact_retention.py`
+
+Run report hiện không nên được đọc như một bảng `c1+c2+c3 = score cuối` đơn giản nữa. Cách đọc đúng là:
+
+- `base_total_score`: judgement gốc từ component scoring
+- `adjusted_total_score`: điểm cuối đang được dùng để rank/display
+- `score_adjustment_total` + `applied_adjustments`: phần giải thích tại sao hai mức điểm khác nhau
 
 ## 6. Review và delivery model
 

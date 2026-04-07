@@ -18,20 +18,22 @@ from digest.workflow.nodes.classify_and_score import (
     CLASSIFY_RESPONSE_FORMAT,
     CLASSIFY_SCORE_SYSTEM,
     CLASSIFY_SCORE_USER_TEMPLATE,
+    CLASSIFY_JSON_STATUS_REPAIRED,
+    CLASSIFY_JSON_STATUS_VALID,
+    _apply_structured_classify_result,
     _annotate_event_clusters,
     _apply_freshness_penalty,
     _apply_source_history_adjustment,
     _apply_strategic_boost,
     _build_related_context,
     _cfg_int,
-    _classify_inference_with_retry,
     _classify_prose_rescue,
-    _finalize_scored_article,
     _held_out_article_fallback,
-    _is_likely_prose_response,
     _llm_failure_fallback,
-    _normalize_classify_inference_response,
     _prepare_classify_candidates,
+    _recover_structured_json_dict,
+    _resolve_classify_inference,
+    _finalize_scored_article,
     _select_top_articles,
     run_json_inference as single_article_json_inference,
 )
@@ -79,6 +81,7 @@ def _batch_system_prompt() -> str:
         "# // MVP3 Speed Optimized - Batch + Parallel\n"
         "Bạn xử lý nhiều bài viết ĐỘC LẬP. Không so sánh chéo.\n"
         "primary_type CHỈ được dùng các giá trị: Product, Society & Culture, Practical.\n"
+        "Mỗi item phải điền đủ factual_summary_vi, why_it_matters_vi, optional_editorial_angle dù ngắn.\n"
         "Trả về đúng JSON với key `articles`. Mỗi item phải có `item_id`.\n"
         "Tuân thủ nghiêm ngặt schema. Không thêm text ngoài JSON."
     )
@@ -113,51 +116,41 @@ def _build_batch_user_prompt(
     return "\n\n".join(blocks)
 
 
-def _apply_result(article: dict[str, Any], result: dict[str, Any], min_score: int) -> None:
-    try:
-        c1 = int(result.get("c1_score", 0) or 0)
-        c2 = int(result.get("c2_score", 0) or 0)
-        c3 = int(result.get("c3_score", 0) or 0)
-    except (TypeError, ValueError):
-        c1, c2, c3 = 0, 0, 0
-
-    analysis_tier = str(result.get("analysis_tier", "")).strip().lower()
-    if analysis_tier not in {"deep", "basic", "skip"}:
-        projected_total = c1 + c2 + c3
-        if projected_total >= min_score:
-            analysis_tier = "deep"
-        elif projected_total >= 30:
-            analysis_tier = "basic"
-        else:
-            analysis_tier = "skip"
-
-    article.update(
-        {
-            "primary_type": result.get("primary_type", "Practical"),
-            "primary_emoji": result.get("primary_emoji", "🛠️"),
-            "c1_score": c1,
-            "c1_reason": str(result.get("c1_reason", "")),
-            "c2_score": c2,
-            "c2_reason": str(result.get("c2_reason", "")),
-            "c3_score": c3,
-            "c3_reason": str(result.get("c3_reason", "")),
-            "total_score": c1 + c2 + c3,
-            "summary_vi": str(result.get("summary_vi", "")),
-            "editorial_angle": str(result.get("editorial_angle", "")),
-            "analysis_tier": analysis_tier,
-            "tags": result.get("tags", []) if isinstance(result.get("tags"), list) else [],
-            "relevance_level": str(result.get("relevance_level", "Low")),
-        }
-    )
+def _apply_result(
+    article: dict[str, Any],
+    result: dict[str, Any],
+    min_score: int,
+    *,
+    json_status: str = CLASSIFY_JSON_STATUS_VALID,
+) -> None:
+    _apply_structured_classify_result(article, result, min_score, json_status=json_status)
     article["component_score_source"] = "model"
-    article["base_total_score"] = c1 + c2 + c3
-    article["adjusted_total_score"] = c1 + c2 + c3
+    article["base_total_score"] = int(article.get("c1_score", 0) or 0) + int(article.get("c2_score", 0) or 0) + int(article.get("c3_score", 0) or 0)
+    article["adjusted_total_score"] = article["base_total_score"]
     article["score_adjustment_total"] = 0
     article["applied_adjustments"] = []
     _apply_strategic_boost(article, min_score)
     _apply_freshness_penalty(article, min_score)
     _apply_source_history_adjustment(article, min_score)
     _finalize_scored_article(article, min_score)
+
+
+def _extract_batch_result_map(parsed: Any, raw_output: str) -> tuple[dict[str, dict[str, Any]], str]:
+    result_map: dict[str, dict[str, Any]] = {}
+    status = CLASSIFY_JSON_STATUS_VALID
+
+    payload = parsed if isinstance(parsed, dict) else None
+    if payload is None:
+        recovered = _recover_structured_json_dict(raw_output)
+        if isinstance(recovered, dict):
+            payload = recovered
+            status = CLASSIFY_JSON_STATUS_REPAIRED
+
+    if isinstance(payload, dict):
+        for item in payload.get("articles", []) or []:
+            if isinstance(item, dict) and str(item.get("item_id", "")).strip():
+                result_map[str(item.get("item_id"))] = item
+    return result_map, status
 
 
 def _fallback_single_article(
@@ -186,27 +179,20 @@ def _fallback_single_article(
         feedback_context=feedback_summary_text or "Chưa có feedback mới từ team.",
     )
     try:
-        inference = _normalize_classify_inference_response(
-            single_article_json_inference(
+        result, json_status, raw_output = _resolve_classify_inference(
+            user_prompt,
+            max_tokens=classify_max_tokens,
+            temperature=0.1,
+            initial_response=single_article_json_inference(
                 CLASSIFY_SCORE_SYSTEM,
                 user_prompt,
                 max_tokens=classify_max_tokens,
                 temperature=0.1,
                 response_format=CLASSIFY_RESPONSE_FORMAT,
-            )
+            ),
         )
-        result, raw_output, looks_structured = inference
-        if result is None and (_is_likely_prose_response(raw_output) or not looks_structured):
-            logger.warning("⚠️ Batch classify fallback prose rescue cho '%s'.", article.get("title", "N/A")[:42])
-        elif result is None:
-            result = _classify_inference_with_retry(
-                user_prompt,
-                max_tokens=classify_max_tokens,
-                temperature=0.1,
-                initial_response=inference,
-            )
         if result and isinstance(result, dict):
-            _apply_result(article, result, min_score)
+            _apply_result(article, result, min_score, json_status=json_status or CLASSIFY_JSON_STATUS_VALID)
         else:
             _classify_prose_rescue(article, raw_output, min_score)
             _apply_source_history_adjustment(article, min_score)
@@ -280,18 +266,14 @@ def batch_classify_and_score_node(state: dict[str, Any]) -> dict[str, Any]:
             temperature=0.1,
             response_format=_batch_response_format(len(item_batch)),
         )
-        result_map: dict[str, dict[str, Any]] = {}
-        if isinstance(parsed, dict):
-            for item in parsed.get("articles", []) or []:
-                if isinstance(item, dict) and str(item.get("item_id", "")).strip():
-                    result_map[str(item.get("item_id"))] = item
+        result_map, batch_json_status = _extract_batch_result_map(parsed, raw_output)
 
         if not result_map:
             logger.warning("⚠️ Batch classify không parse được JSON ổn định; fallback từng bài.")
 
         for item_id, article in item_batch:
             if item_id in result_map:
-                _apply_result(article, result_map[item_id], min_score)
+                _apply_result(article, result_map[item_id], min_score, json_status=batch_json_status)
             else:
                 if raw_output:
                     logger.debug("Batch classify raw output sample: %s", raw_output[:280])

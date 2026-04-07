@@ -83,11 +83,41 @@ def _community_text(article: dict[str, Any]) -> str:
     return community if community else "Chưa có dữ liệu cộng đồng"
 
 
+def _existing_grounding(article: dict[str, Any]) -> dict[str, Any] | None:
+    keys = ("grounding_note", "fact_anchors_text", "reasonable_inferences_text", "unknowns_text")
+    if all(str(article.get(key, "") or "").strip() for key in keys):
+        return {key: article.get(key, "") for key in keys}
+    return None
+
+
+def _structured_context_block(article: dict[str, Any]) -> str:
+    pairs = (
+        ("Structured summary", str(article.get("factual_summary_vi", "") or "").strip()),
+        ("Why it matters", str(article.get("why_it_matters_vi", "") or "").strip()),
+        ("Editorial angle", str(article.get("optional_editorial_angle", "") or article.get("editorial_angle", "") or "").strip()),
+        ("Current note", str(article.get("note_summary_vi", "") or "").strip()),
+    )
+    lines = [f"- {label}: {value}" for label, value in pairs if value]
+    return "\n".join(lines)
+
+
+def _deep_process_source_context(article: dict[str, Any], *, raw_limit: int) -> str:
+    raw_source = str(article.get("content", "") or article.get("snippet", "") or "").strip()
+    structured = _structured_context_block(article)
+    trimmed_raw = raw_source[:raw_limit]
+    if structured and trimmed_raw:
+        return f"{structured}\n\nRaw source excerpt:\n{trimmed_raw}"
+    if structured:
+        return structured
+    return trimmed_raw
+
+
 def _build_batch_user_prompt(batch: list[tuple[str, dict[str, Any]]]) -> str:
     blocks: list[str] = []
     for item_id, article in batch:
         grounding = article.get("_mvp3_grounding", {}) or {}
-        content = (article.get("content", "") or article.get("snippet", ""))[:2800]
+        content = str(article.get("_deep_process_content", "") or "")
+        community_text = str(article.get("community_reactions", "") or "")[:1400]
         
         block = (
             f"===== BEGIN ARTICLE {item_id} =====\n"
@@ -107,7 +137,7 @@ def _build_batch_user_prompt(batch: list[tuple[str, dict[str, Any]]]) -> str:
                 reasonable_inferences=grounding.get("reasonable_inferences_text", "- Không có suy luận bổ sung."),
                 unknowns=grounding.get("unknowns_text", "- Không có unknown lớn từ metadata."),
                 content=content,
-                community_reactions=str(article.get("community_reactions", "") or "")[:2000],
+                community_reactions=community_text,
                 related_past=_related_text(article),
             )
             + f"\n===== END ARTICLE {item_id} =====\n"
@@ -142,16 +172,29 @@ def batch_deep_process_node(state: dict[str, Any]) -> dict[str, Any]:
     # Chunking nhẹ (max 5 bài/lần) để giữ chất lượng
     CHUNK_SIZE = 5
     analyzed: list[dict[str, Any]] = []
+    runtime_config = dict(state.get("runtime_config", {}) or {})
+    raw_limit = max(1200, int(runtime_config.get("deep_process_content_char_limit", 2200) or 2200))
+    community_cache: dict[str, str] = {}
 
     for i in range(0, len(top_articles), CHUNK_SIZE):
         chunk = top_articles[i : i + CHUNK_SIZE]
         batch: list[tuple[str, dict[str, Any]]] = []
 
         for idx, article in enumerate(chunk, 1):
-            article["community_reactions"] = _community_text(article)
-            grounding = build_article_grounding(article)
+            keyword = str(article.get("title", "") or "").split(" – ")[0].split(" | ")[0][:80]
+            if str(article.get("community_reactions", "") or "").strip():
+                community = str(article.get("community_reactions", "") or "")
+            elif keyword in community_cache:
+                community = community_cache[keyword]
+            else:
+                community = _search_community_reactions(keyword) or "Chưa có dữ liệu cộng đồng"
+                community_cache[keyword] = community
+            article["community_reactions"] = community
+
+            grounding = _existing_grounding(article) or build_article_grounding(article)
             article.update(grounding)
             article["_mvp3_grounding"] = grounding
+            article["_deep_process_content"] = _deep_process_source_context(article, raw_limit=raw_limit)
             batch.append((f"top_{i+idx}", article))
 
         logger.info("🔬 Batch deep process chunk %d/%d (%d bài)", i//CHUNK_SIZE + 1, (len(top_articles)+CHUNK_SIZE-1)//CHUNK_SIZE, len(batch))
@@ -181,6 +224,7 @@ def batch_deep_process_node(state: dict[str, Any]) -> dict[str, Any]:
             else:
                 _fallback_bundle(article)
             article.pop("_mvp3_grounding", None)
+            article.pop("_deep_process_content", None)
             analyzed.append(article)
 
     return {"analyzed_articles": analyzed}

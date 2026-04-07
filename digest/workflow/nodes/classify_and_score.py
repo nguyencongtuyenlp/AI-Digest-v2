@@ -24,6 +24,8 @@ Output ghi vào state:
 
 from __future__ import annotations
 
+import ast
+import json
 import logging
 import os
 import re
@@ -49,6 +51,19 @@ from digest.runtime.xai_grok import (
 )
 
 logger = logging.getLogger(__name__)
+
+CLASSIFY_JSON_STATUS_VALID = "valid_json"
+CLASSIFY_JSON_STATUS_REPAIRED = "repaired_json"
+CLASSIFY_JSON_STATUS_PARTIAL = "partial_recovery"
+CLASSIFY_JSON_STATUS_FALLBACK = "hard_fallback"
+
+CLASSIFY_TEXT_FIELDS = (
+    "summary_vi",
+    "factual_summary_vi",
+    "editorial_angle",
+    "why_it_matters_vi",
+    "optional_editorial_angle",
+)
 
 
 def _runtime_config(state: dict[str, Any]) -> dict[str, Any]:
@@ -725,6 +740,10 @@ Nội dung: {content}
 --- FEEDBACK GAN DAY TU TEAM ---
 {feedback_context}
 
+Bắt buộc:
+- Điền đủ `summary_vi`, `factual_summary_vi`, `editorial_angle`, `why_it_matters_vi`, `optional_editorial_angle`.
+- Nếu dữ kiện mỏng, vẫn phải viết ngắn gọn và thận trọng thay vì bỏ trống field.
+
 Trả về JSON theo format yêu cầu."""
 
 CLASSIFY_RETRY_SUFFIX = """
@@ -734,6 +753,7 @@ YÊU CẦU LẦN 2:
 - Không dùng markdown fence.
 - Không giải thích thêm trước hoặc sau JSON.
 - Đảm bảo field `tags` là list tag trong taxonomy hoặc [].
+- Không được bỏ trống `factual_summary_vi`, `why_it_matters_vi`, `optional_editorial_angle`.
 """
 
 CLASSIFY_LAST_CHANCE_SUFFIX = """
@@ -744,6 +764,7 @@ YÊU CẦU LẦN 3:
 - Không markdown fence.
 - Không giải thích.
 - Nếu thiếu dữ liệu, vẫn phải điền score thấp và chọn `skip` hoặc `basic`, không được bỏ JSON.
+- Không được bỏ trống `summary_vi`, `factual_summary_vi`, `why_it_matters_vi`, `optional_editorial_angle`.
 """
 
 CLASSIFY_RESPONSE_FORMAT: dict[str, Any] = {
@@ -885,6 +906,107 @@ def run_json_inference(
     )
 
 
+def _normalize_jsonish_candidate(text: str) -> str:
+    cleaned = str(text or "").strip()
+    cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\s*```$", "", cleaned)
+    cleaned = cleaned.replace("“", '"').replace("”", '"').replace("’", "'").replace("‘", "'")
+    cleaned = cleaned.replace("：", ":").replace("，", ",")
+    cleaned = cleaned.replace("\u00a0", " ")
+    cleaned = re.sub(r"^\s*json\s*", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r",(\s*[}\]])", r"\1", cleaned)
+    return cleaned.strip()
+
+
+def _extract_jsonish_payload(text: str) -> str:
+    raw = str(text or "").strip()
+    if not raw:
+        return ""
+
+    fenced = re.search(r"```(?:json)?\s*(.*?)\s*```", raw, flags=re.IGNORECASE | re.DOTALL)
+    if fenced:
+        return _normalize_jsonish_candidate(fenced.group(1))
+
+    for opener, closer in (("{", "}"), ("[", "]")):
+        start = raw.find(opener)
+        if start == -1:
+            continue
+        depth = 0
+        in_string = False
+        escape_next = False
+        quote_char = ""
+        for index, char in enumerate(raw[start:], start=start):
+            if in_string:
+                if escape_next:
+                    escape_next = False
+                elif char == "\\":
+                    escape_next = True
+                elif char == quote_char:
+                    in_string = False
+                continue
+            if char in {'"', "'"}:
+                in_string = True
+                quote_char = char
+                continue
+            if char == opener:
+                depth += 1
+            elif char == closer:
+                depth -= 1
+                if depth == 0:
+                    return _normalize_jsonish_candidate(raw[start:index + 1])
+    return _normalize_jsonish_candidate(raw) if raw.startswith("{") or raw.startswith("[") else ""
+
+
+def _parse_jsonish_object(candidate: str) -> dict[str, Any] | None:
+    normalized = _normalize_jsonish_candidate(candidate)
+    if not normalized:
+        return None
+
+    candidates = [normalized]
+    quoted_keys = re.sub(r'([{\[,]\s*)([A-Za-z_][A-Za-z0-9_]*)\s*:', r'\1"\2":', normalized)
+    if quoted_keys != normalized:
+        candidates.append(quoted_keys)
+
+    open_braces = normalized.count("{")
+    close_braces = normalized.count("}")
+    if open_braces > close_braces:
+        balanced = normalized + ("}" * (open_braces - close_braces))
+        if balanced not in candidates:
+            candidates.append(balanced)
+        balanced_quoted = re.sub(r'([{\[,]\s*)([A-Za-z_][A-Za-z0-9_]*)\s*:', r'\1"\2":', balanced)
+        if balanced_quoted not in candidates:
+            candidates.append(balanced_quoted)
+
+    for candidate_text in candidates:
+        try:
+            parsed = json.loads(candidate_text)
+            if isinstance(parsed, dict):
+                return parsed
+        except json.JSONDecodeError:
+            pythonish = re.sub(r"\btrue\b", "True", candidate_text, flags=re.IGNORECASE)
+            pythonish = re.sub(r"\bfalse\b", "False", pythonish, flags=re.IGNORECASE)
+            pythonish = re.sub(r"\bnull\b", "None", pythonish, flags=re.IGNORECASE)
+            try:
+                parsed = ast.literal_eval(pythonish)
+                if isinstance(parsed, dict):
+                    return parsed
+            except Exception:
+                continue
+    return None
+
+
+def _recover_structured_json_dict(raw: str) -> dict[str, Any] | None:
+    payload = _extract_jsonish_payload(raw)
+    if payload:
+        parsed = _parse_jsonish_object(payload)
+        if isinstance(parsed, dict):
+            return parsed
+    raw_text = str(raw or "")
+    if "{" in raw_text:
+        return _parse_jsonish_object(raw_text[raw_text.find("{"):])
+    return None
+
+
 def _normalize_classify_inference_response(response: Any) -> tuple[dict[str, Any] | None, str, bool]:
     if isinstance(response, tuple) and len(response) == 3:
         parsed, raw, looks_structured = response
@@ -928,6 +1050,191 @@ def _extract_model_sentences(raw: str) -> list[str]:
         return []
     chunks = re.split(r"(?<=[.!?…])\s+", text)
     return [chunk.strip() for chunk in chunks if chunk.strip()]
+
+
+def _seed_summary_from_article(article: dict[str, Any], *, max_len: int = 260) -> str:
+    seed = (
+        str(article.get("snippet", "") or "").strip()
+        or str(article.get("content", "") or "").strip()
+        or str(article.get("title", "") or "").strip()
+    )
+    if not seed:
+        return ""
+    if seed == str(article.get("title", "") or "").strip():
+        seed = f"Bài viết đề cập tới: {seed}"
+    return sanitize_delivery_text(_clean_prose_snippet(seed, limit=max_len), max_len=max_len)
+
+
+def _seed_editorial_from_article(article: dict[str, Any], *, max_len: int = 180) -> str:
+    title = str(article.get("title", "") or "").strip()
+    seed = f"Điểm đáng chú ý là {title}" if title else str(article.get("snippet", "") or "").strip()
+    return sanitize_delivery_text(_clean_prose_snippet(seed, limit=max_len), max_len=max_len)
+
+
+def _coerce_tag_list(raw_tags: Any) -> list[str]:
+    if isinstance(raw_tags, list):
+        return [str(tag or "").strip() for tag in raw_tags if str(tag or "").strip()]
+    if isinstance(raw_tags, str):
+        return [part.strip() for part in re.split(r"[;,|/]", raw_tags) if part.strip()]
+    return []
+
+
+def _derive_analysis_tier(raw_value: Any, *, total_score: int, min_score: int) -> str:
+    analysis_tier = str(raw_value or "").strip().lower()
+    if analysis_tier in {"deep", "basic", "skip"}:
+        return analysis_tier
+    if total_score >= min_score:
+        return "deep"
+    if total_score >= 30:
+        return "basic"
+    return "skip"
+
+
+def _derive_relevance_level(raw_value: Any, *, total_score: int) -> str:
+    relevance_level = str(raw_value or "").strip()
+    if relevance_level in {"High", "Medium", "Low"}:
+        return relevance_level
+    if total_score >= 70:
+        return "High"
+    if total_score >= 40:
+        return "Medium"
+    return "Low"
+
+
+def _set_classify_json_debug(
+    article: dict[str, Any],
+    *,
+    status: str,
+    missing_fields: list[str] | None = None,
+    recovered_fields: list[str] | None = None,
+) -> None:
+    article["classify_json_status"] = status
+    article["classify_json_missing_fields"] = sorted({str(field) for field in (missing_fields or []) if str(field)})
+    article["classify_json_recovered_fields"] = sorted({str(field) for field in (recovered_fields or []) if str(field)})
+
+
+def _apply_structured_classify_result(
+    article: dict[str, Any],
+    result: dict[str, Any],
+    min_score: int,
+    *,
+    json_status: str,
+) -> str:
+    fallback_type, fallback_emoji = _prefilter_primary_type(str(article.get("title", "") or ""))
+    missing_fields: set[str] = set()
+    recovered_fields: set[str] = set()
+
+    def _text_field(name: str, *, fallback: str = "", max_len: int | None = None) -> str:
+        raw_value = str(result.get(name, "") or "").strip()
+        if raw_value:
+            return sanitize_delivery_text(raw_value, max_len=max_len) if max_len else raw_value
+        missing_fields.add(name)
+        if fallback:
+            recovered_fields.add(name)
+        return sanitize_delivery_text(fallback, max_len=max_len) if max_len and fallback else fallback
+
+    primary_type = str(result.get("primary_type", "") or "").strip() or fallback_type
+    if not str(result.get("primary_type", "") or "").strip():
+        missing_fields.add("primary_type")
+        recovered_fields.add("primary_type")
+
+    primary_emoji = str(result.get("primary_emoji", "") or "").strip()
+    if not primary_emoji:
+        missing_fields.add("primary_emoji")
+        recovered_fields.add("primary_emoji")
+        primary_emoji = {"Product": "🚀", "Society & Culture": "🌍", "Practical": "🛠️"}.get(primary_type, fallback_emoji)
+
+    score_missing = False
+    try:
+        c1 = int(result.get("c1_score", 0) or 0)
+    except (TypeError, ValueError):
+        c1 = 0
+        score_missing = True
+        missing_fields.add("c1_score")
+        recovered_fields.add("c1_score")
+    try:
+        c2 = int(result.get("c2_score", 0) or 0)
+    except (TypeError, ValueError):
+        c2 = 0
+        score_missing = True
+        missing_fields.add("c2_score")
+        recovered_fields.add("c2_score")
+    try:
+        c3 = int(result.get("c3_score", 0) or 0)
+    except (TypeError, ValueError):
+        c3 = 0
+        score_missing = True
+        missing_fields.add("c3_score")
+        recovered_fields.add("c3_score")
+
+    c1 = _clamp_score(c1, low=0, high=33)
+    c2 = _clamp_score(c2, low=0, high=33)
+    c3 = _clamp_score(c3, low=0, high=34)
+    total_score = c1 + c2 + c3
+    if score_missing and total_score == 0 and int(article.get("prefilter_score", 0) or 0) > 0:
+        c1, c2, c3 = _allocate_component_scores(max(12, min(72, int(article.get("prefilter_score", 0) or 0) + 18)))
+        total_score = c1 + c2 + c3
+
+    summary_vi = _text_field("summary_vi", fallback=_seed_summary_from_article(article), max_len=260)
+    factual_summary_vi = _text_field("factual_summary_vi", fallback=summary_vi, max_len=260)
+    editorial_angle = _text_field("editorial_angle", fallback=_seed_editorial_from_article(article), max_len=180)
+    why_it_matters_vi = _text_field("why_it_matters_vi", fallback=editorial_angle or factual_summary_vi, max_len=180)
+    optional_editorial_angle = _text_field(
+        "optional_editorial_angle",
+        fallback=editorial_angle or why_it_matters_vi,
+        max_len=180,
+    )
+    c1_reason = _text_field("c1_reason", fallback="Model không trả rõ lý do C1; hệ giữ mô tả ngắn để không mất trace.", max_len=160)
+    c2_reason = _text_field("c2_reason", fallback="Model không trả rõ lý do C2; hệ giữ mô tả ngắn để không mất trace.", max_len=160)
+    c3_reason = _text_field("c3_reason", fallback="Model không trả rõ lý do C3; hệ giữ mô tả ngắn để không mất trace.", max_len=160)
+
+    raw_tags = result.get("tags", [])
+    tags = _coerce_tag_list(raw_tags)
+    if raw_tags in (None, ""):
+        missing_fields.add("tags")
+        recovered_fields.add("tags")
+    elif not tags and raw_tags:
+        recovered_fields.add("tags")
+
+    analysis_tier = _derive_analysis_tier(result.get("analysis_tier", ""), total_score=total_score, min_score=min_score)
+    if str(result.get("analysis_tier", "") or "").strip().lower() not in {"deep", "basic", "skip"}:
+        missing_fields.add("analysis_tier")
+        recovered_fields.add("analysis_tier")
+    relevance_level = _derive_relevance_level(result.get("relevance_level", ""), total_score=total_score)
+    if str(result.get("relevance_level", "") or "").strip() not in {"High", "Medium", "Low"}:
+        missing_fields.add("relevance_level")
+        recovered_fields.add("relevance_level")
+
+    article.update(
+        {
+            "primary_type": primary_type,
+            "primary_emoji": primary_emoji,
+            "c1_score": c1,
+            "c1_reason": c1_reason,
+            "c2_score": c2,
+            "c2_reason": c2_reason,
+            "c3_score": c3,
+            "c3_reason": c3_reason,
+            "total_score": total_score,
+            "summary_vi": summary_vi,
+            "factual_summary_vi": factual_summary_vi,
+            "why_it_matters_vi": why_it_matters_vi,
+            "optional_editorial_angle": optional_editorial_angle,
+            "editorial_angle": editorial_angle,
+            "analysis_tier": analysis_tier,
+            "tags": tags,
+            "relevance_level": relevance_level,
+        }
+    )
+
+    final_status = CLASSIFY_JSON_STATUS_PARTIAL if recovered_fields else json_status
+    _set_classify_json_debug(
+        article,
+        status=final_status,
+        missing_fields=sorted(missing_fields),
+        recovered_fields=sorted(recovered_fields),
+    )
+    return final_status
 
 
 def _infer_type_from_prose(raw: str, fallback_type: str) -> str:
@@ -983,6 +1290,73 @@ def _classify_prose_rescue(article: dict[str, Any], raw: str, min_score: int) ->
 
     _normalize_primary_type(article)
     _normalize_article_tags(article)
+    _set_classify_json_debug(
+        article,
+        status=CLASSIFY_JSON_STATUS_PARTIAL,
+        missing_fields=list(CLASSIFY_TEXT_FIELDS),
+        recovered_fields=["summary_vi", "factual_summary_vi", "why_it_matters_vi", "optional_editorial_angle", "editorial_angle"],
+    )
+
+
+def _resolve_classify_inference(
+    user_prompt: str,
+    *,
+    max_tokens: int,
+    temperature: float,
+    initial_response: Any | None = None,
+) -> tuple[dict[str, Any] | None, str | None, str]:
+    def _parsed_or_repaired(response: Any) -> tuple[dict[str, Any] | None, str | None, str, bool]:
+        parsed, raw, looks_structured = _normalize_classify_inference_response(response)
+        if parsed and isinstance(parsed, dict):
+            return parsed, CLASSIFY_JSON_STATUS_VALID, raw, looks_structured
+        repaired = _recover_structured_json_dict(raw)
+        if repaired and isinstance(repaired, dict):
+            return repaired, CLASSIFY_JSON_STATUS_REPAIRED, raw, True
+        return None, None, raw, looks_structured
+
+    if initial_response is None:
+        initial_response = run_json_inference(
+            CLASSIFY_SCORE_SYSTEM,
+            user_prompt,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            response_format=CLASSIFY_RESPONSE_FORMAT,
+        )
+
+    result, status, raw, _ = _parsed_or_repaired(initial_response)
+    if result is not None:
+        return result, status, raw
+
+    logger.warning("⚠️ Classify chưa ra JSON ổn định, retry với prompt siết format.")
+    retry_result, retry_status, retry_raw, retry_looks_structured = _parsed_or_repaired(
+        run_json_inference(
+            CLASSIFY_SCORE_SYSTEM,
+            user_prompt + CLASSIFY_RETRY_SUFFIX,
+            max_tokens=max_tokens,
+            temperature=0.0,
+            response_format=CLASSIFY_RESPONSE_FORMAT,
+        )
+    )
+    if retry_result is not None:
+        return retry_result, retry_status, retry_raw
+
+    logger.warning(
+        "⚠️ Retry classify vẫn chưa ổn định (structured=%s); dùng prompt compact lần cuối.",
+        retry_looks_structured,
+    )
+    final_result, final_status, final_raw, _ = _parsed_or_repaired(
+        run_json_inference(
+            CLASSIFY_SCORE_SYSTEM,
+            user_prompt + CLASSIFY_LAST_CHANCE_SUFFIX,
+            max_tokens=min(max_tokens, 220),
+            temperature=0.0,
+            response_format=CLASSIFY_RESPONSE_FORMAT,
+        )
+    )
+    if final_result is not None:
+        return final_result, final_status, final_raw
+    logger.debug("Last chance raw classify output: %s", final_raw[:500])
+    return None, None, final_raw or retry_raw or raw
 
 
 def _classify_inference_with_retry(
@@ -992,65 +1366,13 @@ def _classify_inference_with_retry(
     temperature: float,
     initial_response: Any | None = None,
 ) -> dict[str, Any] | None:
-    if initial_response is None:
-        initial_response = run_json_inference(
-            CLASSIFY_SCORE_SYSTEM,
-            user_prompt,
-            max_tokens=max_tokens,
-            temperature=temperature,
-            response_format=CLASSIFY_RESPONSE_FORMAT,
-        )
-    result, raw, looks_structured = _normalize_classify_inference_response(initial_response)
-    if result and isinstance(result, dict):
-        return result
-    if _is_likely_prose_response(raw):
-        logger.warning(
-            "⚠️ Classify trả prose rõ ràng, bỏ retry để dùng prose rescue/fallback nhanh hơn. Snippet=%s",
-            raw[:180].replace("\n", " "),
-        )
-        return None
-    if not looks_structured:
-        logger.warning(
-            "⚠️ Classify trả prose thay vì JSON, bỏ retry để dùng fallback nhanh hơn. Snippet=%s",
-            raw[:180].replace("\n", " "),
-        )
-        return None
-
-    logger.warning("⚠️ Classify JSON parse failed, retrying once with stricter JSON-only prompt.")
-    retry_prompt = user_prompt + CLASSIFY_RETRY_SUFFIX
-    retry_result, retry_raw, retry_looks_structured = _normalize_classify_inference_response(
-        run_json_inference(
-            CLASSIFY_SCORE_SYSTEM,
-            retry_prompt,
-            max_tokens=max_tokens,
-            temperature=0.0,
-            response_format=CLASSIFY_RESPONSE_FORMAT,
-        )
+    result, _status, _raw = _resolve_classify_inference(
+        user_prompt,
+        max_tokens=max_tokens,
+        temperature=temperature,
+        initial_response=initial_response,
     )
-    if retry_result and isinstance(retry_result, dict):
-        return retry_result
-    if not retry_looks_structured:
-        logger.warning(
-            "⚠️ Retry classify vẫn trả prose, dừng tại đây để dùng fallback. Snippet=%s",
-            retry_raw[:180].replace("\n", " "),
-        )
-        return None
-
-    logger.warning("⚠️ Classify vẫn chưa ra JSON, thử thêm 1 lần với compact JSON prompt.")
-    last_chance_prompt = user_prompt + CLASSIFY_LAST_CHANCE_SUFFIX
-    final_result, final_raw, _ = _normalize_classify_inference_response(
-        run_json_inference(
-            CLASSIFY_SCORE_SYSTEM,
-            last_chance_prompt,
-            max_tokens=min(max_tokens, 220),
-            temperature=0.0,
-            response_format=CLASSIFY_RESPONSE_FORMAT,
-        )
-    )
-    if final_result and isinstance(final_result, dict):
-        return final_result
-    logger.debug("Last chance raw classify output: %s", final_raw[:500])
-    return None
+    return result
 
 
 def _llm_failure_fallback(article: dict[str, Any], min_score: int) -> None:
@@ -1165,6 +1487,7 @@ def _llm_failure_fallback(article: dict[str, Any], min_score: int) -> None:
     _normalize_article_tags(article)
     article["summary_vi"] = sanitize_delivery_text(article.get("summary_vi", ""), max_len=260)
     article["editorial_angle"] = sanitize_delivery_text(article.get("editorial_angle", ""), max_len=180)
+    _set_classify_json_debug(article, status=CLASSIFY_JSON_STATUS_FALLBACK)
 
 
 def _prefilter_score(
@@ -1598,6 +1921,7 @@ def _held_out_article_fallback(article: dict[str, Any]) -> None:
         )
     _recompute_relevance_level(article)
     _normalize_article_tags(article)
+    _set_classify_json_debug(article, status=CLASSIFY_JSON_STATUS_FALLBACK)
     article["summary_vi"] = sanitize_delivery_text(article.get("summary_vi", ""), max_len=260)
     article["editorial_angle"] = sanitize_delivery_text(article.get("editorial_angle", ""), max_len=180)
 
@@ -2411,78 +2735,34 @@ def classify_and_score_node(state: dict[str, Any]) -> dict[str, Any]:
         )
 
         try:
-            inference = _normalize_classify_inference_response(
-                run_json_inference(
-                    CLASSIFY_SCORE_SYSTEM,
-                    user_prompt,
-                    max_tokens=classify_max_tokens,
-                    temperature=0.1,
-                    response_format=CLASSIFY_RESPONSE_FORMAT,
-                )
+            initial_inference = run_json_inference(
+                CLASSIFY_SCORE_SYSTEM,
+                user_prompt,
+                max_tokens=classify_max_tokens,
+                temperature=0.1,
+                response_format=CLASSIFY_RESPONSE_FORMAT,
             )
-            result, raw_output, looks_structured = inference
-
-            if result is None:
-                if _is_likely_prose_response(raw_output) or not looks_structured:
-                    logger.warning("⚠️ Model không trả JSON ổn định cho '%s'; dùng prose rescue/fallback.", title[:40])
-                else:
-                    result = _classify_inference_with_retry(
-                        user_prompt,
-                        max_tokens=classify_max_tokens,
-                        temperature=0.1,
-                        initial_response=inference,
-                    )
+            result, json_status, raw_output = _resolve_classify_inference(
+                user_prompt,
+                max_tokens=classify_max_tokens,
+                temperature=0.1,
+                initial_response=initial_inference,
+            )
 
             if result and isinstance(result, dict):
-                try:
-                    c1 = int(result.get("c1_score", 0) or 0)
-                    c2 = int(result.get("c2_score", 0) or 0)
-                    c3 = int(result.get("c3_score", 0) or 0)
-                except (TypeError, ValueError):
-                    c1, c2, c3 = 0, 0, 0
-
-                analysis_tier = str(result.get("analysis_tier", "")).strip().lower()
-                if analysis_tier not in {"deep", "basic", "skip"}:
-                    projected_total = c1 + c2 + c3
-                    if projected_total >= min_score:
-                        analysis_tier = "deep"
-                    elif projected_total >= 30:
-                        analysis_tier = "basic"
-                    else:
-                        analysis_tier = "skip"
-
-                    article.update({
-                        "primary_type": result.get("primary_type", "Practical"),
-                        "primary_emoji": result.get("primary_emoji", "🛠️"),
-                        "c1_score": c1,
-                        "c1_reason": str(result.get("c1_reason", "")),
-                        "c2_score": c2,
-                        "c2_reason": str(result.get("c2_reason", "")),
-                        "c3_score": c3,
-                        "c3_reason": str(result.get("c3_reason", "")),
-                        "total_score": c1 + c2 + c3,
-                        "summary_vi": str(result.get("summary_vi", "")),
-                        "factual_summary_vi": str(
-                            result.get("factual_summary_vi", result.get("summary_vi", ""))
-                        ),
-                        "why_it_matters_vi": str(
-                            result.get("why_it_matters_vi", result.get("editorial_angle", ""))
-                        ),
-                        "optional_editorial_angle": str(
-                            result.get("optional_editorial_angle", result.get("editorial_angle", ""))
-                        ),
-                        "editorial_angle": str(result.get("editorial_angle", "")),
-                        "analysis_tier": analysis_tier,
-                        "tags": result.get("tags", []) if isinstance(result.get("tags"), list) else [],
-                        "relevance_level": str(result.get("relevance_level", "Low")),
-                    })
+                _apply_structured_classify_result(
+                    article,
+                    result,
+                    min_score,
+                    json_status=json_status or CLASSIFY_JSON_STATUS_VALID,
+                )
                 _initialize_score_tracking(article, component_source="model")
                 _apply_strategic_boost(article, min_score)
                 _apply_freshness_penalty(article, min_score)
                 _apply_source_history_adjustment(article, min_score)
                 _finalize_scored_article(article, min_score)
             else:
-                logger.warning("⚠️ Model không trả JSON cho '%s'", title[:40])
+                logger.warning("⚠️ Model không trả JSON ổn định cho '%s'; dùng prose rescue/fallback.", title[:40])
                 _classify_prose_rescue(article, raw_output, min_score)
                 _apply_source_history_adjustment(article, min_score)
                 _finalize_scored_article(article, min_score)

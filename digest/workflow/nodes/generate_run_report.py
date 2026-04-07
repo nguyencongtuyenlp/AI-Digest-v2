@@ -14,10 +14,12 @@ import os
 from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
+from time import perf_counter
 from typing import Any
 
 
 from digest.runtime.artifact_retention import build_artifact_cleanup_markdown, cleanup_runtime_artifacts
+from digest.runtime.stage_metrics import build_stage_timing_entry, summarize_stage_timings
 from digest.storage.db import get_history
 from digest.editorial.executive_intelligence import build_executive_intelligence_bundle
 from digest.runtime.run_health import assess_run_health
@@ -164,6 +166,66 @@ def _format_score_label(article: dict[str, Any]) -> str:
     return f"score={adjusted_total} (adjusted; base={base_total}; delta={delta:+d})"
 
 
+def _build_performance_markdown(performance_report: dict[str, Any]) -> list[str]:
+    if not performance_report:
+        return []
+
+    lines = ["## Performance", ""]
+    lines.append(f"- Inference backend: {performance_report.get('backend', 'unknown')}")
+    stage_summaries = list(performance_report.get("stage_summaries", []) or [])
+    if stage_summaries:
+        lines.append("")
+        lines.append("| Stage | Invocations | Wall ms | In | Out |")
+        lines.append("|---|---:|---:|---:|---:|")
+        for stage in stage_summaries:
+            lines.append(
+                "| "
+                f"{stage.get('stage', 'unknown')} | "
+                f"{stage.get('invocations', 0)} | "
+                f"{stage.get('total_duration_ms', 0.0):.2f} | "
+                f"{stage.get('input_count_total', 0)} | "
+                f"{stage.get('output_count_total', 0)} |"
+            )
+        lines.append("")
+
+    slowest_stages = list(performance_report.get("slowest_stages", []) or [])
+    lines.append("### Slowest stages")
+    lines.append("")
+    if slowest_stages:
+        for stage in slowest_stages:
+            lines.append(
+                "- "
+                f"{stage.get('stage', 'unknown')} | "
+                f"wall={stage.get('total_duration_ms', 0.0):.2f}ms | "
+                f"invocations={stage.get('invocations', 0)} | "
+                f"in={stage.get('input_count_total', 0)} out={stage.get('output_count_total', 0)}"
+            )
+    else:
+        lines.append("- Chưa có stage timing data.")
+    lines.append("")
+
+    lines.append("### Token-waste hotspots")
+    lines.append("")
+    hotspots = list(performance_report.get("token_waste_hotspots", []) or [])
+    if hotspots:
+        for item in hotspots:
+            lines.append(f"- {item}")
+    else:
+        lines.append("- Chưa thấy hotspot rõ ràng từ run này.")
+    lines.append("")
+
+    lines.append("### Future parallelization opportunities")
+    lines.append("")
+    opportunities = list(performance_report.get("future_parallelization_opportunities", []) or [])
+    if opportunities:
+        for item in opportunities:
+            lines.append(f"- {item}")
+    else:
+        lines.append("- Chưa có cơ hội song song hóa nổi bật từ run này.")
+    lines.append("")
+    return lines
+
+
 def _build_run_report_markdown(state: dict[str, Any], generated_at: datetime) -> str:
     raw_articles = list(state.get("raw_articles", []))
     new_articles = list(state.get("new_articles", []))
@@ -192,6 +254,9 @@ def _build_run_report_markdown(state: dict[str, Any], generated_at: datetime) ->
     gather_snapshot_path = str(state.get("gather_snapshot_path", "") or "")
     scored_snapshot_path = str(state.get("scored_snapshot_path", "") or "")
     run_health = dict(state.get("run_health", {}) or assess_run_health(state))
+    performance_report = dict(
+        state.get("performance_report", {}) or summarize_stage_timings(list(state.get("stage_timings", []) or []), state)
+    )
     health_metrics = dict(run_health.get("metrics", {}) or {})
     source_history_map = load_source_history()
     source_history_leaders, source_history_risky = batch_source_history_rows(scored_articles or raw_articles, source_history_map)
@@ -242,6 +307,8 @@ def _build_run_report_markdown(state: dict[str, Any], generated_at: datetime) ->
         for key, value in sorted(runtime_config.items()):
             lines.append(f"- {key}: {value}")
         lines.append("")
+
+    lines.extend(_build_performance_markdown(performance_report))
 
     if gather_snapshot_path or scored_snapshot_path:
         lines.extend(["## Temporal Snapshots", ""])
@@ -456,6 +523,7 @@ def _build_run_report_markdown(state: dict[str, Any], generated_at: datetime) ->
 
 
 def generate_run_report_node(state: dict[str, Any]) -> dict[str, Any]:
+    started = perf_counter()
     generated_at = datetime.now(timezone.utc)
     reports_dir = Path(os.getenv("DIGEST_REPORTS_DIR", "reports"))
     reports_dir.mkdir(parents=True, exist_ok=True)
@@ -514,8 +582,6 @@ def generate_run_report_node(state: dict[str, Any]) -> dict[str, Any]:
         )
         enriched_state["grok_source_gap_suggestions"] = list(source_gap_result.get("suggestions", []) or [])
         enriched_state["grok_source_gap_batch_note"] = str(source_gap_result.get("batch_note", "") or "")
-    report_markdown = _build_run_report_markdown(enriched_state, generated_at)
-    report_path.write_text(report_markdown, encoding="utf-8")
 
     artifact_cleanup = cleanup_runtime_artifacts(
         state=enriched_state,
@@ -527,9 +593,21 @@ def generate_run_report_node(state: dict[str, Any]) -> dict[str, Any]:
             str(enriched_state.get("watchlist_report_path", "") or ""),
         ],
     )
+    stage_entry = build_stage_timing_entry(
+        "generate_run_report",
+        state,
+        {"run_report_path": str(report_path)},
+        (perf_counter() - started) * 1000.0,
+    )
+    all_stage_timings = list(state.get("stage_timings", []) or []) + [stage_entry]
+    enriched_state["stage_timings"] = all_stage_timings
+    performance_report = summarize_stage_timings(all_stage_timings, enriched_state)
+    enriched_state["performance_report"] = performance_report
+    report_markdown = _build_run_report_markdown(enriched_state, generated_at)
     cleanup_lines = build_artifact_cleanup_markdown(artifact_cleanup)
     if cleanup_lines:
-        report_path.write_text(report_markdown.rstrip() + "\n\n" + "\n".join(cleanup_lines).rstrip() + "\n", encoding="utf-8")
+        report_markdown = report_markdown.rstrip() + "\n\n" + "\n".join(cleanup_lines).rstrip() + "\n"
+    report_path.write_text(report_markdown, encoding="utf-8")
 
     logger.info("🧾 Run report written: %s", report_path)
     return {
@@ -542,4 +620,6 @@ def generate_run_report_node(state: dict[str, Any]) -> dict[str, Any]:
         "grok_source_gap_suggestions": list(enriched_state.get("grok_source_gap_suggestions", []) or []),
         "grok_source_gap_batch_note": str(enriched_state.get("grok_source_gap_batch_note", "") or ""),
         "artifact_cleanup": artifact_cleanup,
+        "performance_report": performance_report,
+        "stage_timings": [stage_entry],
     }

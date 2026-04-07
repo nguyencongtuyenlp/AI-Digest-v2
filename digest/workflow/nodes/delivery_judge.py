@@ -19,7 +19,9 @@ from digest.editorial.editorial_guardrails import build_article_grounding
 from digest.editorial.delivery_policy import (
     canonical_skip_reason,
     ensure_main_brief_contract,
+    is_preferred_main_brief_source,
     project_fit_bucket,
+    source_quality_rank,
 )
 from digest.editorial.digest_formatter import canonical_type_name, type_emoji
 from digest.runtime.mlx_runner import run_json_inference
@@ -75,6 +77,33 @@ LANE_TEXT_HINTS: dict[str, tuple[str, ...]] = {
     ),
     "Practical": ("tutorial", "guide", "workflow", "how to", "playbook", "best practice", "tooling"),
 }
+MAIN_BRIEF_SOCIETY_BUILDER_TAGS = {
+    "developer_tools",
+    "api_platform",
+    "infrastructure",
+    "ai_agents",
+}
+MAIN_BRIEF_SOCIETY_DIRECT_SYSTEM_HINTS = (
+    "pricing",
+    "pay extra",
+    "cost",
+    "compliance",
+    "policy",
+    "regulation",
+    "licensing",
+    "compute",
+    "data center",
+    "datacenter",
+    "power",
+    "infrastructure",
+    "deployment",
+    "deployers",
+    "security",
+    "safety",
+    "content moderation",
+    "model access",
+    "api",
+)
 
 VERGE_NON_AI_KEYWORDS = [
     "gaming glasses",
@@ -170,6 +199,9 @@ EVENT_PROMO_TITLE_RE = re.compile(
 )
 FACEBOOK_OLD_HINT_RE = re.compile(r"^\d+\s*(tháng|năm|month|months|year|years)\b", re.IGNORECASE)
 MAX_MAIN_BRIEF_AGE_HOURS = 24 * 7
+MAIN_BRIEF_MAX_ITEMS = 6
+MAIN_BRIEF_MIN_SELECTION_SCORE = 62
+MAIN_BRIEF_MIN_STRONG_SOURCE_SCORE = 58
 
 
 def _runtime_int(runtime_config: dict[str, Any], runtime_key: str, env_key: str, default: int) -> int:
@@ -203,17 +235,7 @@ def _fails_verge_non_ai_keyword_filter(article: dict[str, Any]) -> bool:
 
 
 def _source_preference_rank(article: dict[str, Any]) -> int:
-    source_kind = str(article.get("source_kind", "") or "").strip().lower()
-    return {
-        "official": 6,
-        "watchlist": 5,
-        "strong_media": 4,
-        "regional_media": 3,
-        "manual": 2,
-        "review": 2,
-        "github": 1,
-        "community": 0,
-    }.get(source_kind, 1)
+    return source_quality_rank(article)
 
 
 def _deterministic_delivery_assessment(article: dict[str, Any]) -> dict[str, Any]:
@@ -613,6 +635,280 @@ def _candidate_sort_key(article: dict[str, Any]) -> tuple[int, int, int, int, in
     )
 
 
+def _reason_code_set(article: dict[str, Any]) -> set[str]:
+    return {str(code or "").strip().lower() for code in list(article.get("main_brief_reason_codes", []) or [])}
+
+
+def _society_direct_system_signal(article: dict[str, Any]) -> tuple[int, int]:
+    combined = " ".join(
+        str(
+            article.get(field, "") or ""
+        )
+        for field in ("title", "summary_vi", "editorial_angle", "why_it_matters_vi", "snippet", "note_summary_vi")
+    ).lower()
+    tags = {
+        str(tag or "").strip().lower()
+        for tag in article.get("tags", []) or []
+        if str(tag or "").strip()
+    }
+    builder_tags = len(tags & MAIN_BRIEF_SOCIETY_BUILDER_TAGS)
+    direct_hits = sum(1 for keyword in MAIN_BRIEF_SOCIETY_DIRECT_SYSTEM_HINTS if keyword in combined)
+    return builder_tags, direct_hits
+
+
+def _build_main_brief_selection_context(
+    articles: list[dict[str, Any]],
+    reviewed_articles: list[dict[str, Any]],
+    *,
+    state: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    run_metrics = dict((state or {}).get("run_health", {}).get("metrics", {}) or {})
+    total_pool = len(articles)
+    preferred_pool = sum(1 for article in articles if is_preferred_main_brief_source(article))
+    official_pool = sum(1 for article in articles if str(article.get("source_kind", "") or "").strip().lower() == "official")
+    official_viable_pool = sum(
+        1
+        for article in articles
+        if str(article.get("source_kind", "") or "").strip().lower() == "official"
+        and int(article.get("main_brief_score", article.get("total_score", 0)) or 0) >= 60
+        and int(article.get("delivery_score", 0) or 0) >= 11
+    )
+    github_pool = sum(1 for article in articles if str(article.get("source_kind", "") or "").strip().lower() == "github")
+    proxy_pool = sum(
+        1
+        for article in articles
+        if str(article.get("source_kind", "") or "").strip().lower() == "regional_media"
+        or "source_penalty:proxy" in _reason_code_set(article)
+    )
+    reviewed_count = max(1, len(reviewed_articles))
+    reviewed_github_ratio = (
+        sum(1 for article in reviewed_articles if str(article.get("source_kind", "") or "").strip().lower() == "github")
+        / reviewed_count
+    )
+    penalized_reviewed = sum(
+        1 for article in reviewed_articles if int(article.get("source_history_penalty", 0) or 0) >= 8
+    )
+    weak_source_mix = total_pool > 0 and (
+        preferred_pool < min(2, total_pool)
+        or proxy_pool >= max(1, total_pool // 3)
+    )
+    high_noise_presence = reviewed_github_ratio >= 0.30 or penalized_reviewed >= max(3, len(reviewed_articles) // 5)
+    official_gap = int(run_metrics.get("official_main_candidate_count", official_viable_pool) or 0) == 0
+    conservative = official_gap or weak_source_mix or high_noise_presence
+    max_items = MAIN_BRIEF_MAX_ITEMS
+    if official_gap:
+        max_items = min(max_items, 5)
+    if official_gap and weak_source_mix:
+        max_items = min(max_items, 4)
+
+    return {
+        "official_gap": official_gap,
+        "weak_source_mix": weak_source_mix,
+        "high_noise_presence": high_noise_presence,
+        "conservative": conservative,
+        "max_items": max_items,
+        "preferred_pool": preferred_pool,
+        "official_pool": official_pool,
+        "official_viable_pool": official_viable_pool,
+        "github_pool": github_pool,
+        "proxy_pool": proxy_pool,
+    }
+
+
+def _main_brief_selection_score(article: dict[str, Any], selection_context: dict[str, Any] | None = None) -> int:
+    score = int(article.get("main_brief_score", article.get("total_score", 0)) or 0)
+    delivery_score = int(article.get("delivery_score", 0) or 0)
+    source_kind = str(article.get("source_kind", "") or "").strip().lower()
+    article_type = canonical_type_name(article.get("primary_type"))
+    reason_codes = _reason_code_set(article)
+
+    score += delivery_score
+    score += _source_preference_rank(article) * 2
+
+    if source_kind == "official":
+        score += 10
+    elif is_preferred_main_brief_source(article):
+        score += 6
+    elif source_kind == "regional_media":
+        score -= 6
+    elif source_kind == "github":
+        score -= 14
+
+    if "source_penalty:proxy" in reason_codes:
+        score -= 8
+    if "github_significant" in reason_codes:
+        score += 10
+    if "github_low_impact" in reason_codes:
+        score -= 8
+    if article_type == "Society & Culture":
+        score -= 8
+        if "society_high_consequence" in reason_codes:
+            score += 6
+        elif "society_ecosystem_implication" in reason_codes:
+            score += 4
+
+    if project_fit_bucket(article) == "low":
+        score -= 6
+    if selection_context:
+        if selection_context.get("conservative") and not is_preferred_main_brief_source(article):
+            score -= 3
+        if selection_context.get("official_gap") and source_kind in {"regional_media", "github"}:
+            score -= 4
+        if selection_context.get("weak_source_mix") and source_kind not in {"official", "strong_media"}:
+            score -= 2
+
+    return score
+
+
+def _passes_main_brief_quality_floor(article: dict[str, Any], selection_context: dict[str, Any] | None = None) -> bool:
+    selection_score = _main_brief_selection_score(article, selection_context)
+    delivery_score = int(article.get("delivery_score", 0) or 0)
+    source_kind = str(article.get("source_kind", "") or "").strip().lower()
+    reason_codes = _reason_code_set(article)
+    article_type = canonical_type_name(article.get("primary_type"))
+    preferred_source = is_preferred_main_brief_source(article)
+    min_delivery = 11
+
+    if source_kind == "official":
+        floor = 60
+    elif source_kind == "strong_media":
+        floor = MAIN_BRIEF_MIN_STRONG_SOURCE_SCORE + 4
+    elif source_kind == "regional_media":
+        floor = MAIN_BRIEF_MIN_SELECTION_SCORE + 8
+        min_delivery = 12
+    elif source_kind == "github":
+        if "github_significant" not in reason_codes:
+            return False
+        floor = MAIN_BRIEF_MIN_SELECTION_SCORE + 14
+        min_delivery = 13
+    else:
+        floor = MAIN_BRIEF_MIN_SELECTION_SCORE
+
+    if article_type == "Society & Culture":
+        if not reason_codes & {"society_high_consequence", "society_ecosystem_implication"}:
+            return False
+        builder_tags, direct_hits = _society_direct_system_signal(article)
+        if builder_tags == 0 and direct_hits < 2:
+            return False
+        floor += 6
+        if "society_high_consequence" in reason_codes:
+            floor -= 2
+        if builder_tags == 0:
+            floor += 2
+    if "source_penalty:proxy" in reason_codes:
+        floor += 6
+
+    if selection_context:
+        if selection_context.get("conservative"):
+            floor += 3
+            if not preferred_source:
+                min_delivery = max(min_delivery, 12)
+        if selection_context.get("official_gap") and not preferred_source:
+            floor += 3
+        if selection_context.get("weak_source_mix") and source_kind in {"regional_media", "github", "community"}:
+            floor += 3
+        if selection_context.get("high_noise_presence") and source_kind in {"github", "regional_media"}:
+            floor += 2
+
+    if delivery_score < min_delivery:
+        return False
+    if project_fit_bucket(article) == "low" and not preferred_source:
+        return False
+    return selection_score >= floor
+
+
+def _select_main_brief_candidates(
+    articles: list[dict[str, Any]],
+    *,
+    reviewed_articles: list[dict[str, Any]] | None = None,
+    state: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    reviewed = list(reviewed_articles or articles)
+    selection_context = _build_main_brief_selection_context(articles, reviewed, state=state)
+    ordered = sorted(
+        articles,
+        key=lambda article: (_main_brief_selection_score(article, selection_context),) + _candidate_sort_key(article),
+        reverse=True,
+    )
+
+    selected: list[dict[str, Any]] = []
+    official_pool = [
+        article for article in ordered if str(article.get("source_kind", "") or "").strip().lower() == "official"
+    ]
+    preferred_pool = [article for article in ordered if is_preferred_main_brief_source(article)]
+    seed_pool = official_pool or preferred_pool
+    if seed_pool:
+        strongest_preferred = seed_pool[0]
+        if _passes_main_brief_quality_floor(strongest_preferred, selection_context):
+            selected.append(strongest_preferred)
+
+    for article in ordered:
+        if article in selected:
+            continue
+        if len(selected) >= int(selection_context.get("max_items", MAIN_BRIEF_MAX_ITEMS)):
+            break
+        if not _passes_main_brief_quality_floor(article, selection_context):
+            continue
+        selected.append(article)
+
+    return selected[: int(selection_context.get("max_items", MAIN_BRIEF_MAX_ITEMS))]
+
+
+def _selection_skip_reason(article: dict[str, Any], selection_context: dict[str, Any]) -> tuple[str, str]:
+    source_kind = str(article.get("source_kind", "") or "").strip().lower()
+    article_type = canonical_type_name(article.get("primary_type"))
+    reason_codes = _reason_code_set(article)
+
+    if source_kind == "github":
+        return "github_topic_only", "selection_excluded:github_quality_floor"
+    if "source_penalty:proxy" in reason_codes or source_kind == "regional_media":
+        return "weak_signal", "selection_excluded:proxy_recap"
+    if article_type == "Society & Culture":
+        if "society_high_consequence" in reason_codes:
+            return "low_operator_value", "selection_excluded:society_not_strong_enough"
+        return "weak_signal", "selection_excluded:society_low_consequence"
+    if selection_context.get("conservative") and not is_preferred_main_brief_source(article):
+        return "weak_signal", "selection_excluded:conservative_quality_floor"
+    if project_fit_bucket(article) == "low":
+        return "low_operator_value", "selection_excluded:low_operator_value"
+    return "weak_signal", "selection_excluded:quality_floor"
+
+
+def _mark_main_brief_selection_skips(
+    reviewed_articles: list[dict[str, Any]],
+    telegram_candidates: list[dict[str, Any]],
+    selection_context: dict[str, Any],
+) -> None:
+    selected_keys = {
+        str(article.get("url", "") or article.get("title", "") or id(article))
+        for article in telegram_candidates
+    }
+
+    for article in reviewed_articles:
+        article_key = str(article.get("url", "") or article.get("title", "") or id(article))
+        if article_key in selected_keys:
+            continue
+        if str(article.get("delivery_decision", "") or "").strip().lower() != "include":
+            continue
+        if str(article.get("delivery_lane_candidate", "") or "").strip().lower() != "main":
+            continue
+
+        reason, detail_code = _selection_skip_reason(article, selection_context)
+        reason_codes = list(article.get("main_brief_reason_codes", []) or [])
+        if detail_code not in reason_codes:
+            reason_codes.append(detail_code)
+        if selection_context.get("conservative") and "selection_mode:conservative" not in reason_codes:
+            reason_codes.append("selection_mode:conservative")
+        article["main_brief_reason_codes"] = reason_codes[:14]
+        article["delivery_decision"] = "skip"
+        article["delivery_route_reason"] = reason
+        article["delivery_skip_reason"] = reason
+        article["main_brief_skip_reason"] = reason
+        article["delivery_rationale"] = (
+            "Bài vượt qua routing ban đầu nhưng không vượt quality floor cuối của main brief."
+        )
+
+
 def _sync_primary_type(article: dict[str, Any]) -> None:
     canonical = canonical_type_name(article.get("primary_type"))
     article["primary_type"] = canonical
@@ -870,16 +1166,18 @@ def delivery_judge_node(state: dict[str, Any]) -> dict[str, Any]:
         and not _is_facebook_topic_article(article)
     ]
 
-    telegram_candidates = _select_diverse_candidates(
+    selection_context = _build_main_brief_selection_context(main_include_articles, reviewed_articles, state=state)
+    telegram_candidates = _select_main_brief_candidates(
         main_include_articles,
-        limit=max(1, len(main_include_articles)),
-        diversify_by_type=True,
+        reviewed_articles=reviewed_articles,
+        state=state,
     )
     _apply_grok_final_editor_pass(
         telegram_candidates,
         runtime_config=runtime_config,
         feedback_summary_text=str(state.get("feedback_summary_text", "") or ""),
     )
+    _mark_main_brief_selection_skips(reviewed_articles, telegram_candidates, selection_context)
 
     selected_keys = {
         str(article.get("url", "") or article.get("title", "") or id(article))

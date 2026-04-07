@@ -5,10 +5,13 @@ Workflow graph implementation cho Daily Digest AI Agent.
 from __future__ import annotations
 
 import operator
+from time import perf_counter
 from typing import Annotated, Any, TypedDict
 
 from langgraph.graph import StateGraph, END
 from langgraph.types import Send
+
+from digest.runtime.stage_metrics import build_stage_timing_entry
 
 
 class DigestState(TypedDict, total=False):
@@ -68,6 +71,8 @@ class DigestState(TypedDict, total=False):
     grok_source_gap_suggestions: list[dict[str, Any]]
     grok_source_gap_batch_note: str
     artifact_cleanup: dict[str, Any]
+    performance_report: dict[str, Any]
+    stage_timings: Annotated[list[dict[str, Any]], operator.add]
 
 
 # ── Node imports ─────────────────────────────────────────────────────
@@ -133,23 +138,36 @@ def _merge_processed_articles_node(state: DigestState) -> dict[str, Any]:
     return {"analyzed_articles": analyzed, "final_articles": merged}
 
 
+def _instrument_stage_node(stage: str, node_fn):
+    def _wrapped(state: DigestState) -> dict[str, Any]:
+        started = perf_counter()
+        result = dict(node_fn(state) or {})
+        result.setdefault(
+            "stage_timings",
+            [build_stage_timing_entry(stage, state, result, (perf_counter() - started) * 1000.0)],
+        )
+        return result
+
+    return _wrapped
+
+
 def build_graph() -> StateGraph:
     graph = StateGraph(DigestState)
 
-    graph.add_node("gather", gather_news_node)
-    graph.add_node("normalize_source", normalize_source_node)
-    graph.add_node("deduplicate", deduplicate_node)
-    graph.add_node("early_rule_filter", early_rule_filter_node)
-    graph.add_node("collect_feedback", collect_feedback_node)
-    graph.add_node("batch_classify_and_score", batch_classify_and_score_node)
-    graph.add_node("batch_deep_process", batch_deep_process_node)
-    graph.add_node("batch_quick_compose", batch_quick_compose_node)
-    graph.add_node("merge_processed_articles", _merge_processed_articles_node)
-    graph.add_node("delivery_judge", delivery_judge_node)
-    graph.add_node("save_notion", save_notion_node)
-    graph.add_node("summarize_vn", summarize_vn_node)
-    graph.add_node("quality_gate", quality_gate_node)
-    graph.add_node("send_telegram", send_telegram_node)
+    graph.add_node("gather", _instrument_stage_node("gather", gather_news_node))
+    graph.add_node("normalize_source", _instrument_stage_node("normalize_source", normalize_source_node))
+    graph.add_node("deduplicate", _instrument_stage_node("deduplicate", deduplicate_node))
+    graph.add_node("early_rule_filter", _instrument_stage_node("early_rule_filter", early_rule_filter_node))
+    graph.add_node("collect_feedback", _instrument_stage_node("collect_feedback", collect_feedback_node))
+    graph.add_node("batch_classify_and_score", _instrument_stage_node("batch_classify_and_score", batch_classify_and_score_node))
+    graph.add_node("batch_deep_process", _instrument_stage_node("batch_deep_process", batch_deep_process_node))
+    graph.add_node("batch_quick_compose", _instrument_stage_node("batch_quick_compose", batch_quick_compose_node))
+    graph.add_node("merge_processed_articles", _instrument_stage_node("merge_processed_articles", _merge_processed_articles_node))
+    graph.add_node("delivery_judge", _instrument_stage_node("delivery_judge", delivery_judge_node))
+    graph.add_node("save_notion", _instrument_stage_node("save_notion", save_notion_node))
+    graph.add_node("summarize_vn", _instrument_stage_node("summarize_vn", summarize_vn_node))
+    graph.add_node("quality_gate", _instrument_stage_node("quality_gate", quality_gate_node))
+    graph.add_node("send_telegram", _instrument_stage_node("send_telegram", send_telegram_node))
     graph.add_node("generate_run_report", generate_run_report_node)
 
     graph.set_entry_point("gather")
