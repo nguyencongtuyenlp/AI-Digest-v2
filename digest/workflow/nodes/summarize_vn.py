@@ -19,6 +19,7 @@ from digest.editorial.editorial_guardrails import (
 from digest.runtime.xai_grok import (
     grok_news_copy_enabled,
     grok_news_copy_max_articles,
+    merge_grok_observability,
     rewrite_news_blurbs,
 )
 
@@ -99,9 +100,19 @@ def _apply_grok_news_copy(
     *,
     runtime_config: dict[str, Any],
     feedback_summary_text: str,
-) -> None:
+) -> dict[str, Any]:
+    metrics = {
+        "enabled": grok_news_copy_enabled(runtime_config),
+        "request_count": 0,
+        "success_count": 0,
+        "fallback_count": 0,
+        "items_processed": 0,
+        "applied": False,
+        "shortlist_size": 0,
+        "polished_count": 0,
+    }
     if not grok_news_copy_enabled(runtime_config):
-        return
+        return metrics
 
     shortlist: list[dict[str, Any]] = []
     seen_keys: set[str] = set()
@@ -119,14 +130,20 @@ def _apply_grok_news_copy(
         if len(shortlist) >= max_articles:
             break
 
+    metrics["shortlist_size"] = len(shortlist)
     if not shortlist:
-        return
+        return metrics
 
     try:
+        metrics["request_count"] = 1
+        metrics["items_processed"] = len(shortlist)
         rewritten = rewrite_news_blurbs(shortlist, feedback_summary_text=feedback_summary_text)
     except Exception:
         logger.exception("⚠️ Grok news copy failed; using deterministic fallback copy.")
+        metrics["fallback_count"] = 1
         rewritten = {}
+    if not rewritten and metrics["request_count"] > 0:
+        metrics["fallback_count"] = max(1, int(metrics.get("fallback_count", 0) or 0))
     updated = 0
     for article in shortlist:
         key = str(article.get("url", "") or article.get("title", "") or "")
@@ -135,10 +152,22 @@ def _apply_grok_news_copy(
         if not blurb:
             continue
         article["telegram_blurb_vi"] = blurb
+        article["grok_polish_applied"] = True
+        article["copy_source_used"] = "grok_polish"
         updated += 1
 
+    if metrics["request_count"] > 0:
+        for article in shortlist:
+            if article.get("grok_polish_applied"):
+                continue
+            article["copy_source_used"] = "structured_local_fallback"
+
+    metrics["success_count"] = 1 if rewritten else 0
+    metrics["applied"] = updated > 0
+    metrics["polished_count"] = updated
     if updated:
         logger.info("✅ Grok news copy polished %d/%d selected articles.", updated, len(shortlist))
+    return metrics
 
 
 def summarize_vn_node(state: dict[str, Any]) -> dict[str, Any]:
@@ -158,10 +187,28 @@ def summarize_vn_node(state: dict[str, Any]) -> dict[str, Any]:
     runtime_config = dict(state.get("runtime_config", {}) or {})
     per_type_limit = _dynamic_per_type_limit(briefing_articles)
 
-    _apply_grok_news_copy(
+    for article in briefing_articles:
+        article.setdefault("grok_polish_applied", False)
+        article.setdefault("copy_source_used", "structured_local")
+
+    polish_metrics = _apply_grok_news_copy(
         [briefing_articles],
         runtime_config=runtime_config,
         feedback_summary_text=str(state.get("feedback_summary_text", "") or ""),
+    )
+    grok_metrics = merge_grok_observability(
+        state,
+        stage="final_polish",
+        enabled=bool(polish_metrics.get("enabled", False)),
+        request_count=int(polish_metrics.get("request_count", 0) or 0),
+        success_count=int(polish_metrics.get("success_count", 0) or 0),
+        fallback_count=int(polish_metrics.get("fallback_count", 0) or 0),
+        items_processed=int(polish_metrics.get("items_processed", 0) or 0),
+        applied=bool(polish_metrics.get("applied", False)),
+        extra={
+            "shortlist_size": int(polish_metrics.get("shortlist_size", 0) or 0),
+            "polished_count": int(polish_metrics.get("polished_count", 0) or 0),
+        },
     )
 
     if (
@@ -174,6 +221,7 @@ def summarize_vn_node(state: dict[str, Any]) -> dict[str, Any]:
             "summary_vn": "",
             "telegram_messages": [],
             "summary_mode": "no_candidates",
+            **grok_metrics,
         }
 
     type_coverage = len(
@@ -213,6 +261,7 @@ def summarize_vn_node(state: dict[str, Any]) -> dict[str, Any]:
             "summary_vn": safe_summary,
             "telegram_messages": [safe_summary],
             "summary_mode": "deterministic_fallback",
+            **grok_metrics,
         }
 
     summary = "\n\n".join(telegram_messages)
@@ -221,4 +270,5 @@ def summarize_vn_node(state: dict[str, Any]) -> dict[str, Any]:
         "summary_vn": summary,
         "telegram_messages": telegram_messages,
         "summary_mode": "deterministic_sections",
+        **grok_metrics,
     }

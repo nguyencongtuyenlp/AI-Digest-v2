@@ -28,6 +28,7 @@ from digest.sources.source_history import batch_source_history_rows, load_source
 from digest.runtime.xai_grok import (
     grok_source_gap_enabled,
     grok_source_gap_max_articles,
+    merge_grok_observability,
     suggest_source_gap_expansion,
 )
 
@@ -251,6 +252,15 @@ def _build_run_report_markdown(state: dict[str, Any], generated_at: datetime) ->
     topic_pages = list(state.get("topic_pages", []) or [])
     grok_source_gap_suggestions = list(state.get("grok_source_gap_suggestions", []) or [])
     grok_source_gap_batch_note = str(state.get("grok_source_gap_batch_note", "") or "")
+    grok_stage_usage = {
+        str(key): dict(value or {})
+        for key, value in dict(state.get("grok_stage_usage", {}) or {}).items()
+        if str(key).strip()
+    }
+    grok_request_count = int(state.get("grok_request_count", 0) or 0)
+    grok_success_count = int(state.get("grok_success_count", 0) or 0)
+    grok_fallback_count = int(state.get("grok_fallback_count", 0) or 0)
+    grok_items_processed = int(state.get("grok_items_processed", 0) or 0)
     gather_snapshot_path = str(state.get("gather_snapshot_path", "") or "")
     scored_snapshot_path = str(state.get("scored_snapshot_path", "") or "")
     run_health = dict(state.get("run_health", {}) or assess_run_health(state))
@@ -280,6 +290,10 @@ def _build_run_report_markdown(state: dict[str, Any], generated_at: datetime) ->
         f"- Summary mode: {summary_mode or 'unknown'}",
         f"- Health status: {run_health.get('status', 'unknown')}",
         f"- Publish ready: {'yes' if run_health.get('publish_ready') else 'no'}",
+        f"- Grok requests: {grok_request_count}",
+        f"- Grok successes: {grok_success_count}",
+        f"- Grok fallbacks: {grok_fallback_count}",
+        f"- Grok items processed: {grok_items_processed}",
         "",
     ]
 
@@ -309,6 +323,39 @@ def _build_run_report_markdown(state: dict[str, Any], generated_at: datetime) ->
         lines.append("")
 
     lines.extend(_build_performance_markdown(performance_report))
+
+    lines.extend(["## Grok Usage", ""])
+    if grok_stage_usage:
+        for stage, metrics in sorted(grok_stage_usage.items()):
+            lines.append(
+                "- "
+                f"{stage}: enabled={metrics.get('enabled', False)} "
+                f"requests={metrics.get('request_count', 0)} "
+                f"success={metrics.get('success_count', 0)} "
+                f"fallback={metrics.get('fallback_count', 0)} "
+                f"items={metrics.get('items_processed', 0)} "
+                f"applied={metrics.get('applied', False)}"
+            )
+            extra_parts = []
+            for key in (
+                "shortlist_size",
+                "applied_article_count",
+                "polished_count",
+                "local_failure_count",
+                "grok_rescue_count",
+                "benchmark_request_count",
+                "benchmark_success_count",
+                "provider_local_count",
+                "provider_grok_count",
+                "provider_local_then_grok_count",
+            ):
+                if key in metrics:
+                    extra_parts.append(f"{key}={metrics.get(key)}")
+            if extra_parts:
+                lines.append("- " + ", ".join(extra_parts))
+    else:
+        lines.append("- Không có stage Grok nào chạy trong run này.")
+    lines.append("")
 
     if gather_snapshot_path or scored_snapshot_path:
         lines.extend(["## Temporal Snapshots", ""])
@@ -424,6 +471,7 @@ def _build_run_report_markdown(state: dict[str, Any], generated_at: datetime) ->
                 f"{article.get('title', 'N/A')} | "
                 f"prefilter={breakdown.get('prefilter_score', article.get('prefilter_score', 0))} | "
                 f"c1={article.get('c1_score', 0)} c2={article.get('c2_score', 0)} c3={article.get('c3_score', 0)} | "
+                f"classify_provider={breakdown.get('classify_provider_used', article.get('classify_provider_used', 'local'))} | "
                 f"base={base_total} adjusted={adjusted_total} delta={delta:+d} | "
                 f"adjustments={_format_adjustments(adjustments)} | "
                 f"source_kind={breakdown.get('source_kind', article.get('source_kind', 'unknown'))} | "
@@ -573,7 +621,17 @@ def generate_run_report_node(state: dict[str, Any]) -> dict[str, Any]:
         enriched_state["watchlist_report_path"] = ""
 
     runtime_config = dict(state.get("runtime_config", {}) or {})
+    source_gap_metrics = {
+        "enabled": grok_source_gap_enabled(runtime_config),
+        "request_count": 0,
+        "success_count": 0,
+        "fallback_count": 0,
+        "items_processed": 0,
+        "applied": False,
+    }
     if grok_source_gap_enabled(runtime_config):
+        source_gap_metrics["request_count"] = 1
+        source_gap_metrics["items_processed"] = len(list(state.get("scored_articles", []) or [])[:grok_source_gap_max_articles(runtime_config)])
         source_gap_result = suggest_source_gap_expansion(
             list(state.get("scored_articles", []) or [])[:grok_source_gap_max_articles(runtime_config)],
             list(state.get("raw_articles", []) or []),
@@ -582,6 +640,23 @@ def generate_run_report_node(state: dict[str, Any]) -> dict[str, Any]:
         )
         enriched_state["grok_source_gap_suggestions"] = list(source_gap_result.get("suggestions", []) or [])
         enriched_state["grok_source_gap_batch_note"] = str(source_gap_result.get("batch_note", "") or "")
+        if enriched_state["grok_source_gap_suggestions"] or enriched_state["grok_source_gap_batch_note"]:
+            source_gap_metrics["success_count"] = 1
+            source_gap_metrics["applied"] = bool(enriched_state["grok_source_gap_suggestions"])
+        else:
+            source_gap_metrics["fallback_count"] = 1
+
+    grok_metrics = merge_grok_observability(
+        enriched_state,
+        stage="source_gap",
+        enabled=bool(source_gap_metrics.get("enabled", False)),
+        request_count=int(source_gap_metrics.get("request_count", 0) or 0),
+        success_count=int(source_gap_metrics.get("success_count", 0) or 0),
+        fallback_count=int(source_gap_metrics.get("fallback_count", 0) or 0),
+        items_processed=int(source_gap_metrics.get("items_processed", 0) or 0),
+        applied=bool(source_gap_metrics.get("applied", False)),
+    )
+    enriched_state.update(grok_metrics)
 
     artifact_cleanup = cleanup_runtime_artifacts(
         state=enriched_state,
@@ -619,6 +694,11 @@ def generate_run_report_node(state: dict[str, Any]) -> dict[str, Any]:
         "publish_ready": bool(run_health.get("publish_ready", False)),
         "grok_source_gap_suggestions": list(enriched_state.get("grok_source_gap_suggestions", []) or []),
         "grok_source_gap_batch_note": str(enriched_state.get("grok_source_gap_batch_note", "") or ""),
+        "grok_stage_usage": dict(enriched_state.get("grok_stage_usage", {}) or {}),
+        "grok_request_count": int(enriched_state.get("grok_request_count", 0) or 0),
+        "grok_success_count": int(enriched_state.get("grok_success_count", 0) or 0),
+        "grok_fallback_count": int(enriched_state.get("grok_fallback_count", 0) or 0),
+        "grok_items_processed": int(enriched_state.get("grok_items_processed", 0) or 0),
         "artifact_cleanup": artifact_cleanup,
         "performance_report": performance_report,
         "stage_timings": [stage_entry],

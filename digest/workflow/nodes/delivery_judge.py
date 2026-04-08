@@ -30,6 +30,7 @@ from digest.runtime.xai_grok import (
     grok_delivery_max_articles,
     grok_final_editor_enabled,
     grok_final_editor_max_articles,
+    merge_grok_observability,
     rerank_delivery_articles,
     rerank_final_digest_articles,
 )
@@ -970,9 +971,19 @@ def _apply_grok_delivery_rerank(
     *,
     runtime_config: dict[str, Any],
     feedback_summary_text: str = "",
-) -> None:
+) -> dict[str, Any]:
+    metrics = {
+        "enabled": grok_delivery_enabled(runtime_config),
+        "request_count": 0,
+        "success_count": 0,
+        "fallback_count": 0,
+        "items_processed": 0,
+        "applied": False,
+        "shortlist_size": 0,
+        "applied_article_count": 0,
+    }
     if not grok_delivery_enabled(runtime_config):
-        return
+        return metrics
 
     shortlist = _select_diverse_candidates(
         [
@@ -984,22 +995,33 @@ def _apply_grok_delivery_rerank(
         limit=grok_delivery_max_articles(runtime_config),
         diversify_by_type=False,
     )
+    metrics["shortlist_size"] = len(shortlist)
     if not shortlist:
-        return
+        return metrics
 
     logger.info("🧠 Grok rerank: sending %d shortlist articles for main brief selection.", len(shortlist))
+    metrics["request_count"] = 1
+    metrics["items_processed"] = len(shortlist)
     reranked = rerank_delivery_articles(shortlist, feedback_summary_text=feedback_summary_text)
     if not reranked:
-        return
+        metrics["fallback_count"] = 1
+        return metrics
 
+    metrics["success_count"] = 1
+    applied_count = 0
     for article in shortlist:
         article_key = article.get("url", "") or article.get("title", "")
         judged = reranked.get(article_key)
         if not judged:
             continue
+        before_decision = str(article.get("delivery_decision", "") or "review")
+        before_lane = canonical_type_name(article.get("primary_type")) or str(article.get("primary_type", "") or "")
+        before_priority = int(article.get("grok_priority_score", article.get("main_brief_score", article.get("total_score", 0))) or 0)
         article["grok_priority_score"] = int(judged.get("priority_score", 0) or 0)
         article["grok_delivery_decision"] = str(judged.get("decision", article.get("delivery_decision", "review")) or "review")
         article["grok_delivery_rationale"] = str(judged.get("rationale", "") or "")
+        article["grok_rerank_applied"] = True
+        article["grok_rerank_reason"] = str(judged.get("rationale", "") or "")
 
         lane_override = str(judged.get("lane_override", "keep") or "keep")
         if lane_override != "keep":
@@ -1011,12 +1033,25 @@ def _apply_grok_delivery_rerank(
         rationale = str(judged.get("rationale", "") or "").strip()
         if rationale:
             article["delivery_rationale"] = rationale
+        article["grok_rerank_delta"] = {
+            "decision_before": before_decision,
+            "decision_after": str(article.get("delivery_decision", "") or before_decision),
+            "priority_score_before": before_priority,
+            "priority_score_after": int(article.get("grok_priority_score", before_priority) or before_priority),
+            "lane_before": before_lane,
+            "lane_after": canonical_type_name(article.get("primary_type")) or str(article.get("primary_type", "") or before_lane),
+        }
+        applied_count += 1
+
+    metrics["applied"] = applied_count > 0
+    metrics["applied_article_count"] = applied_count
 
     logger.info(
         "✅ Grok rerank applied to %d/%d shortlist articles.",
         sum(1 for article in shortlist if article.get("grok_delivery_decision")),
         len(shortlist),
     )
+    return metrics
 
 
 def _apply_grok_final_editor_pass(
@@ -1024,19 +1059,34 @@ def _apply_grok_final_editor_pass(
     *,
     runtime_config: dict[str, Any],
     feedback_summary_text: str = "",
-) -> None:
+) -> dict[str, Any]:
+    metrics = {
+        "enabled": grok_final_editor_enabled(runtime_config),
+        "request_count": 0,
+        "success_count": 0,
+        "fallback_count": 0,
+        "items_processed": 0,
+        "applied": False,
+        "shortlist_size": 0,
+        "applied_article_count": 0,
+    }
     if not grok_final_editor_enabled(runtime_config):
-        return
+        return metrics
 
     shortlist = list(telegram_candidates[:grok_final_editor_max_articles(runtime_config)])
+    metrics["shortlist_size"] = len(shortlist)
     if len(shortlist) < 2:
-        return
+        return metrics
 
     logger.info("🧠 Grok final editor: ordering %d selected main brief articles.", len(shortlist))
+    metrics["request_count"] = 1
+    metrics["items_processed"] = len(shortlist)
     reranked = rerank_final_digest_articles(shortlist, feedback_summary_text=feedback_summary_text)
     if not reranked:
-        return
+        metrics["fallback_count"] = 1
+        return metrics
 
+    metrics["success_count"] = 1
     updated = 0
     for article in shortlist:
         article_key = article.get("url", "") or article.get("title", "")
@@ -1049,7 +1099,10 @@ def _apply_grok_final_editor_pass(
             article["grok_final_editor_note"] = rationale
         updated += 1
 
+    metrics["applied"] = updated > 0
+    metrics["applied_article_count"] = updated
     logger.info("✅ Grok final editor ordered %d/%d main brief articles.", updated, len(shortlist))
+    return metrics
 
 
 def _select_diverse_candidates(
@@ -1143,6 +1196,9 @@ def delivery_judge_node(state: dict[str, Any]) -> dict[str, Any]:
                 logger.debug("Delivery judge fallback for '%s': %s", article.get("title", "")[:50], exc)
 
         _merge_judge_result(article, base, judged)
+        article.setdefault("grok_rerank_applied", False)
+        article.setdefault("grok_rerank_delta", {})
+        article.setdefault("grok_rerank_reason", "")
         if article.get("delivery_decision") == "skip":
             article["delivery_skip_reason"] = _infer_skip_reason_from_article(article)
         elif article.get("delivery_decision") != "include":
@@ -1153,7 +1209,7 @@ def delivery_judge_node(state: dict[str, Any]) -> dict[str, Any]:
             )
         reviewed_articles.append(article)
 
-    _apply_grok_delivery_rerank(
+    rerank_metrics = _apply_grok_delivery_rerank(
         reviewed_articles,
         runtime_config=runtime_config,
         feedback_summary_text=str(state.get("feedback_summary_text", "") or ""),
@@ -1172,7 +1228,7 @@ def delivery_judge_node(state: dict[str, Any]) -> dict[str, Any]:
         reviewed_articles=reviewed_articles,
         state=state,
     )
-    _apply_grok_final_editor_pass(
+    final_editor_metrics = _apply_grok_final_editor_pass(
         telegram_candidates,
         runtime_config=runtime_config,
         feedback_summary_text=str(state.get("feedback_summary_text", "") or ""),
@@ -1206,7 +1262,39 @@ def delivery_judge_node(state: dict[str, Any]) -> dict[str, Any]:
         len(telegram_candidates),
         len(reviewed_articles),
     )
+    grok_metrics = merge_grok_observability(
+        state,
+        stage="delivery_rerank",
+        enabled=bool(rerank_metrics.get("enabled", False)),
+        request_count=int(rerank_metrics.get("request_count", 0) or 0),
+        success_count=int(rerank_metrics.get("success_count", 0) or 0),
+        fallback_count=int(rerank_metrics.get("fallback_count", 0) or 0),
+        items_processed=int(rerank_metrics.get("items_processed", 0) or 0),
+        applied=bool(rerank_metrics.get("applied", False)),
+        extra={
+            "shortlist_size": int(rerank_metrics.get("shortlist_size", 0) or 0),
+            "applied_article_count": int(rerank_metrics.get("applied_article_count", 0) or 0),
+        },
+    )
+    grok_metrics = {
+        **grok_metrics,
+        **merge_grok_observability(
+            {**state, **grok_metrics},
+            stage="final_editor_order",
+            enabled=bool(final_editor_metrics.get("enabled", False)),
+            request_count=int(final_editor_metrics.get("request_count", 0) or 0),
+            success_count=int(final_editor_metrics.get("success_count", 0) or 0),
+            fallback_count=int(final_editor_metrics.get("fallback_count", 0) or 0),
+            items_processed=int(final_editor_metrics.get("items_processed", 0) or 0),
+            applied=bool(final_editor_metrics.get("applied", False)),
+            extra={
+                "shortlist_size": int(final_editor_metrics.get("shortlist_size", 0) or 0),
+                "applied_article_count": int(final_editor_metrics.get("applied_article_count", 0) or 0),
+            },
+        ),
+    }
     return {
         "final_articles": reviewed_articles,
         "telegram_candidates": telegram_candidates,
+        **grok_metrics,
     }

@@ -745,6 +745,7 @@ HTML_PAGE = """<!doctype html>
     button:disabled { opacity: 0.45; cursor: not-allowed; transform: none; filter: none; }
     .btn-preview { background: linear-gradient(180deg, #2b98f0, #2381d2); color: white; }
     .btn-smart { background: linear-gradient(180deg, #7a66f2, #5e4fe0); color: white; }
+    .btn-grok-full { background: linear-gradient(180deg, #e88a34, #cf7022); color: white; }
     .btn-approve { background: linear-gradient(180deg, #39a872, #2c8f62); color: white; }
     .btn-publish { background: linear-gradient(180deg, #db7a5d, #c76549); color: white; }
     .btn-notion { background: linear-gradient(180deg, #86715e, #6f5d4e); color: white; }
@@ -1225,7 +1226,8 @@ HTML_PAGE = """<!doctype html>
           <h1>Founder-grade digest preview workspace</h1>
           <p class="hero-copy">
             Màn này chỉ làm một việc: cho bạn xem trước đầu ra sẽ lên Telegram ở bản tin chính.
-            `Run Preview` là baseline bám production; `Grok Smart` là nhánh thử nghiệm mở rộng Grok để so chất lượng.
+            `Run Preview` là baseline bám production; `Grok Smart` là nhánh thử nghiệm mở rộng Grok để so chất lượng;
+            `Grok 3-Stage` bật đúng classify rescue + delivery rerank + final polish.
             UI không còn là nơi chỉnh tham số thủ công.
           </p>
 
@@ -1244,6 +1246,7 @@ HTML_PAGE = """<!doctype html>
           <div class="toolbar">
             <button id="btn-preview" class="btn-preview">Run Preview (Production)</button>
             <button id="btn-smart-preview" class="btn-smart">Run Preview (Grok Smart)</button>
+            <button id="btn-grok-full-preview" class="btn-grok-full">Run Preview (Grok 3-Stage)</button>
             <button id="btn-notion-only" class="btn-notion">Publish Notion only</button>
             <button id="btn-approve" class="btn-approve">Approve Preview</button>
             <button id="btn-publish" class="btn-publish">Publish thật</button>
@@ -1482,6 +1485,18 @@ HTML_PAGE = """<!doctype html>
       await refreshStatus();
     }
 
+    async function runGrokThreeStagePreview() {
+      await callApi('/api/run', {
+        mode: 'preview',
+        run_profile: 'grok_3_stage',
+        runtime_config: {
+          max_classify_articles: 8,
+          max_deep_analysis_articles: 4,
+        },
+      });
+      await refreshStatus();
+    }
+
     async function runPublish() {
       const ok = confirm('Chạy publish thật? Việc này có thể gửi Telegram và tạo Notion page.');
       if (!ok) return;
@@ -1684,6 +1699,7 @@ HTML_PAGE = """<!doctype html>
 
       document.getElementById('btn-preview').disabled = data.running;
       document.getElementById('btn-smart-preview').disabled = data.running;
+      document.getElementById('btn-grok-full-preview').disabled = data.running;
       document.getElementById('btn-notion-only').disabled = data.running || !data.can_publish_notion_only;
       document.getElementById('btn-publish').disabled = data.running;
       document.getElementById('btn-refresh').disabled = data.running;
@@ -1693,6 +1709,7 @@ HTML_PAGE = """<!doctype html>
 
     document.getElementById('btn-preview').addEventListener('click', runPreview);
     document.getElementById('btn-smart-preview').addEventListener('click', runSmartPreview);
+    document.getElementById('btn-grok-full-preview').addEventListener('click', runGrokThreeStagePreview);
     document.getElementById('btn-notion-only').addEventListener('click', publishNotionOnly);
     document.getElementById('btn-publish').addEventListener('click', runPublish);
     document.getElementById('btn-approve').addEventListener('click', approvePreview);

@@ -13,6 +13,7 @@ from typing import Any
 
 from digest.runtime.mlx_runner import run_json_inference_meta
 from digest.runtime.temporal_snapshots import write_temporal_snapshot
+from digest.runtime.xai_grok import grok_classify_enabled, merge_grok_observability
 
 from digest.workflow.nodes.classify_and_score import (
     CLASSIFY_RESPONSE_FORMAT,
@@ -32,7 +33,7 @@ from digest.workflow.nodes.classify_and_score import (
     _llm_failure_fallback,
     _prepare_classify_candidates,
     _recover_structured_json_dict,
-    _resolve_classify_inference,
+    _resolve_classify_inference_details,
     _finalize_scored_article,
     _select_top_articles,
     run_json_inference as single_article_json_inference,
@@ -122,8 +123,10 @@ def _apply_result(
     min_score: int,
     *,
     json_status: str = CLASSIFY_JSON_STATUS_VALID,
+    provider_used: str = "local",
 ) -> None:
     _apply_structured_classify_result(article, result, min_score, json_status=json_status)
+    article["classify_provider_used"] = str(provider_used or "local")
     article["component_score_source"] = "model"
     article["base_total_score"] = int(article.get("c1_score", 0) or 0) + int(article.get("c2_score", 0) or 0) + int(article.get("c3_score", 0) or 0)
     article["adjusted_total_score"] = article["base_total_score"]
@@ -160,7 +163,8 @@ def _fallback_single_article(
     classify_content_limit: int,
     classify_max_tokens: int,
     feedback_summary_text: str,
-) -> dict[str, Any]:
+    runtime_config: dict[str, Any] | None = None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
     user_prompt = CLASSIFY_SCORE_USER_TEMPLATE.format(
         title=article.get("title", "N/A"),
         url=article.get("url", ""),
@@ -178,8 +182,18 @@ def _fallback_single_article(
         related_context=_build_related_context(article),
         feedback_context=feedback_summary_text or "Chưa có feedback mới từ team.",
     )
+    details: dict[str, Any] = {
+        "grok_request_count": 0,
+        "grok_success_count": 0,
+        "grok_fallback_count": 0,
+        "grok_items_processed": 0,
+        "classify_local_failure_count": 0,
+        "classify_grok_rescue_count": 0,
+        "classify_benchmark_request_count": 0,
+        "classify_benchmark_success_count": 0,
+    }
     try:
-        result, json_status, raw_output = _resolve_classify_inference(
+        result, json_status, raw_output, provider_used, details = _resolve_classify_inference_details(
             user_prompt,
             max_tokens=classify_max_tokens,
             temperature=0.1,
@@ -190,19 +204,28 @@ def _fallback_single_article(
                 temperature=0.1,
                 response_format=CLASSIFY_RESPONSE_FORMAT,
             ),
+            runtime_config=runtime_config,
         )
+        article["classify_provider_used"] = str(provider_used or "local")
         if result and isinstance(result, dict):
-            _apply_result(article, result, min_score, json_status=json_status or CLASSIFY_JSON_STATUS_VALID)
+            _apply_result(
+                article,
+                result,
+                min_score,
+                json_status=json_status or CLASSIFY_JSON_STATUS_VALID,
+                provider_used=str(provider_used or "local"),
+            )
         else:
             _classify_prose_rescue(article, raw_output, min_score)
             _apply_source_history_adjustment(article, min_score)
             _finalize_scored_article(article, min_score)
     except Exception as exc:
         logger.error("❌ Batch classify single fallback failed: '%s': %s", article.get("title", "N/A")[:42], exc)
+        article["classify_provider_used"] = str(article.get("classify_provider_used", "local") or "local")
         _llm_failure_fallback(article, min_score)
         _apply_source_history_adjustment(article, min_score)
         _finalize_scored_article(article, min_score)
-    return article
+    return article, details
 
 
 def batch_classify_and_score_node(state: dict[str, Any]) -> dict[str, Any]:
@@ -227,6 +250,7 @@ def batch_classify_and_score_node(state: dict[str, Any]) -> dict[str, Any]:
     classify_max_tokens = _cfg_int(state, "classify_max_tokens", "CLASSIFY_MAX_TOKENS", 320)
     runtime_config = dict(state.get("runtime_config", {}) or {})
     batch_size = max(2, int(runtime_config.get("batch_classify_size", 8) or 8))
+    grok_classify_is_enabled = grok_classify_enabled(runtime_config)
 
     llm_articles, held_out_articles = _prepare_classify_candidates(
         list(articles),
@@ -245,6 +269,15 @@ def batch_classify_and_score_node(state: dict[str, Any]) -> dict[str, Any]:
 
     scored: list[dict[str, Any]] = []
     feedback_summary_text = str(state.get("feedback_summary_text", "") or "")
+    classify_grok_request_count = 0
+    classify_grok_success_count = 0
+    classify_grok_fallback_count = 0
+    classify_grok_items_processed = 0
+    classify_local_failure_count = 0
+    classify_grok_rescue_count = 0
+    classify_benchmark_request_count = 0
+    classify_benchmark_success_count = 0
+    classify_provider_counts = {"local": 0, "grok": 0, "local_then_grok": 0}
 
     for batch_index in range(0, len(llm_articles), batch_size):
         batch_articles = llm_articles[batch_index: batch_index + batch_size]
@@ -273,21 +306,42 @@ def batch_classify_and_score_node(state: dict[str, Any]) -> dict[str, Any]:
 
         for item_id, article in item_batch:
             if item_id in result_map:
-                _apply_result(article, result_map[item_id], min_score, json_status=batch_json_status)
+                _apply_result(
+                    article,
+                    result_map[item_id],
+                    min_score,
+                    json_status=batch_json_status,
+                    provider_used="local",
+                )
+                classify_provider_counts["local"] += 1
             else:
                 if raw_output:
                     logger.debug("Batch classify raw output sample: %s", raw_output[:280])
-                _fallback_single_article(
+                article, details = _fallback_single_article(
                     article,
                     min_score=min_score,
                     classify_content_limit=classify_content_limit,
                     classify_max_tokens=classify_max_tokens,
                     feedback_summary_text=feedback_summary_text,
+                    runtime_config=runtime_config,
                 )
+                provider_key = str(article.get("classify_provider_used", "local") or "local")
+                if provider_key not in classify_provider_counts:
+                    provider_key = "local"
+                classify_provider_counts[provider_key] += 1
+                classify_grok_request_count += int(details.get("grok_request_count", 0) or 0)
+                classify_grok_success_count += int(details.get("grok_success_count", 0) or 0)
+                classify_grok_fallback_count += int(details.get("grok_fallback_count", 0) or 0)
+                classify_grok_items_processed += int(details.get("grok_items_processed", 0) or 0)
+                classify_local_failure_count += int(details.get("classify_local_failure_count", 0) or 0)
+                classify_grok_rescue_count += int(details.get("classify_grok_rescue_count", 0) or 0)
+                classify_benchmark_request_count += int(details.get("classify_benchmark_request_count", 0) or 0)
+                classify_benchmark_success_count += int(details.get("classify_benchmark_success_count", 0) or 0)
             scored.append(article)
 
     for article in held_out_articles:
         _held_out_article_fallback(article)
+        classify_provider_counts["local"] += 1
         _apply_source_history_adjustment(article, min_score)
         _finalize_scored_article(article, min_score)
         scored.append(article)
@@ -327,9 +381,30 @@ def batch_classify_and_score_node(state: dict[str, Any]) -> dict[str, Any]:
         },
     )
 
+    grok_metrics = merge_grok_observability(
+        state,
+        stage="classify",
+        enabled=grok_classify_is_enabled,
+        request_count=classify_grok_request_count,
+        success_count=classify_grok_success_count,
+        fallback_count=classify_grok_fallback_count,
+        items_processed=classify_grok_items_processed,
+        applied=classify_grok_rescue_count > 0,
+        extra={
+            "local_failure_count": classify_local_failure_count,
+            "grok_rescue_count": classify_grok_rescue_count,
+            "benchmark_request_count": classify_benchmark_request_count,
+            "benchmark_success_count": classify_benchmark_success_count,
+            "provider_local_count": classify_provider_counts.get("local", 0),
+            "provider_grok_count": classify_provider_counts.get("grok", 0),
+            "provider_local_then_grok_count": classify_provider_counts.get("local_then_grok", 0),
+        },
+    )
+
     return {
         "scored_articles": scored,
         "top_articles": top,
         "low_score_articles": low,
         "scored_snapshot_path": scored_snapshot_path,
+        **grok_metrics,
     }

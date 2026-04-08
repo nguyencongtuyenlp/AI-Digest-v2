@@ -160,6 +160,125 @@ class MVP3SpeedOptimizedTest(unittest.TestCase):
             "Đội build agent có thêm primitive để triển khai production nhanh hơn.",
         )
 
+    @patch("digest.workflow.nodes.batch_classify_and_score_node.write_temporal_snapshot", return_value="reports/mock.json")
+    @patch("digest.workflow.nodes.classify_and_score.call_xai_structured_json")
+    @patch("digest.workflow.nodes.batch_classify_and_score_node.single_article_json_inference")
+    @patch(
+        "digest.workflow.nodes.batch_classify_and_score_node.run_json_inference_meta",
+        return_value=(
+            {
+                "articles": [
+                    {
+                        "item_id": "article_0",
+                        "primary_type": "Product",
+                        "primary_emoji": "🚀",
+                        "c1_score": 20,
+                        "c1_reason": "fresh",
+                        "c2_score": 18,
+                        "c2_reason": "useful",
+                        "c3_score": 18,
+                        "c3_reason": "fit",
+                        "summary_vi": "OpenAI công bố SDK agent mới cho enterprise workflows.",
+                        "factual_summary_vi": "OpenAI công bố SDK agent mới cho workflow enterprise.",
+                        "editorial_angle": "SDK này có thể giúp team tăng tốc triển khai agent.",
+                        "why_it_matters_vi": "Đội build agent có thêm primitive để triển khai production nhanh hơn.",
+                        "optional_editorial_angle": "Tín hiệu tích cực cho builder workflow.",
+                        "analysis_tier": "deep",
+                        "tags": ["api_platform"],
+                        "relevance_level": "High",
+                    }
+                ]
+            },
+            "{}",
+            True,
+        ),
+    )
+    def test_batch_classify_uses_grok_only_for_unstable_single_item_retry(
+        self,
+        _mock_batch_infer,
+        mock_single_article_infer,
+        mock_grok_json,
+        _mock_snapshot,
+    ) -> None:
+        mock_single_article_infer.side_effect = [
+            (None, "", False),
+            (None, "", False),
+            (None, "", False),
+        ]
+        mock_grok_json.return_value = {
+            "primary_type": "Product",
+            "primary_emoji": "🚀",
+            "c1_score": 22,
+            "c1_reason": "fresh",
+            "c2_score": 20,
+            "c2_reason": "useful",
+            "c3_score": 18,
+            "c3_reason": "fit",
+            "summary_vi": "Anthropic cập nhật mới cho Claude Code enterprise.",
+            "factual_summary_vi": "Anthropic cập nhật mới cho Claude Code enterprise.",
+            "editorial_angle": "Đây là tín hiệu vận hành đáng theo dõi.",
+            "why_it_matters_vi": "Nó giúp team triển khai agent enterprise có thêm bối cảnh vận hành.",
+            "optional_editorial_angle": "Tín hiệu tích cực cho builder workflow.",
+            "analysis_tier": "deep",
+            "tags": ["api_platform"],
+            "relevance_level": "High",
+        }
+
+        state = {
+            "filtered_articles": [
+                {
+                    "title": "OpenAI launches new agent SDK",
+                    "url": "https://example.com/a",
+                    "source": "OpenAI",
+                    "source_domain": "openai.com",
+                    "source_tier": "a",
+                    "source_kind": "official",
+                    "source_verified": True,
+                    "content_available": True,
+                    "content": "A new SDK for building production agents.",
+                    "snippet": "A new SDK for building production agents.",
+                    "published_at": "2026-04-06T00:00:00+00:00",
+                    "published_at_source": "source_metadata",
+                    "freshness_bucket": "fresh",
+                    "is_ai_relevant": True,
+                    "event_is_primary": True,
+                },
+                {
+                    "title": "Anthropic updates Claude Code enterprise controls",
+                    "url": "https://example.com/b",
+                    "source": "Anthropic",
+                    "source_domain": "anthropic.com",
+                    "source_tier": "a",
+                    "source_kind": "official",
+                    "source_verified": True,
+                    "content_available": True,
+                    "content": "Anthropic updated enterprise controls for Claude Code.",
+                    "snippet": "Anthropic updated enterprise controls for Claude Code.",
+                    "published_at": "2026-04-06T00:00:00+00:00",
+                    "published_at_source": "source_metadata",
+                    "freshness_bucket": "fresh",
+                    "is_ai_relevant": True,
+                    "event_is_primary": True,
+                },
+            ],
+            "runtime_config": {
+                "max_classify_articles": 5,
+                "max_deep_analysis_articles": 3,
+                "batch_classify_size": 2,
+                "use_grok_for_classify": True,
+            },
+            "feedback_summary_text": "",
+            "feedback_preference_profile": {},
+        }
+
+        result = batch_classify_and_score_node(state)
+
+        rescued = next(article for article in result["scored_articles"] if article["url"] == "https://example.com/b")
+        self.assertEqual(rescued["classify_provider_used"], "local_then_grok")
+        self.assertEqual(result["grok_request_count"], 1)
+        self.assertEqual(result["grok_stage_usage"]["classify"]["items_processed"], 1)
+        self.assertEqual(mock_grok_json.call_count, 1)
+
     @patch(
         "digest.workflow.nodes.batch_deep_process_node.run_json_inference_meta",
         return_value=(

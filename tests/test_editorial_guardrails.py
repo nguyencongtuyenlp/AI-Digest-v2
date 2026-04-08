@@ -1125,11 +1125,113 @@ class EditorialGuardrailsTest(unittest.TestCase):
             }
         )
 
-        self.assertEqual(len(result["telegram_candidates"]), 1)
-        self.assertEqual(result["telegram_candidates"][0]["url"], "https://example.com/b")
-        self.assertEqual(result["telegram_candidates"][0]["primary_type"], "Product")
-        self.assertEqual(result["telegram_candidates"][0]["grok_priority_score"], 91)
-        self.assertEqual(result["final_articles"][0]["delivery_decision"], "skip")
+        article_a = next(article for article in result["final_articles"] if article["url"] == "https://example.com/a")
+        article_b = next(article for article in result["final_articles"] if article["url"] == "https://example.com/b")
+        self.assertEqual(article_b["primary_type"], "Product")
+        self.assertEqual(article_b["grok_priority_score"], 91)
+        self.assertTrue(article_a["grok_rerank_applied"])
+        self.assertTrue(article_b["grok_rerank_applied"])
+        self.assertEqual(article_a["grok_rerank_delta"]["decision_after"], "skip")
+        self.assertEqual(article_b["grok_rerank_delta"]["decision_after"], "include")
+
+    @patch("digest.workflow.nodes.delivery_judge.grok_delivery_max_articles", return_value=2)
+    @patch("digest.workflow.nodes.delivery_judge.rerank_delivery_articles", return_value={})
+    @patch("digest.workflow.nodes.delivery_judge.grok_delivery_enabled", return_value=True)
+    @patch("digest.workflow.nodes.delivery_judge.grok_final_editor_enabled", return_value=False)
+    @patch("digest.workflow.nodes.delivery_judge.run_json_inference")
+    def test_delivery_judge_grok_rerank_only_sees_final_shortlist(
+        self,
+        mock_local_judge,
+        _mock_final_editor_enabled,
+        _mock_grok_enabled,
+        mock_grok_rerank,
+        _mock_grok_limit,
+    ) -> None:
+        mock_local_judge.return_value = {
+            "groundedness_score": 4,
+            "freshness_score": 4,
+            "operator_value_score": 4,
+            "decision": "include",
+            "rationale": "Đủ mạnh để đưa vào brief.",
+        }
+
+        result = delivery_judge_node(
+            {
+                "runtime_config": {"use_grok_for_delivery_rerank": True},
+                "final_articles": [
+                    {
+                        "title": f"Article {index}",
+                        "url": f"https://example.com/{index}",
+                        "source": "RSS: Example",
+                        "source_domain": "example.com",
+                        "primary_type": "Product",
+                        "total_score": 85 - index,
+                        "content_available": True,
+                        "source_verified": True,
+                        "source_tier": "a",
+                        "is_ai_relevant": True,
+                        "event_is_primary": True,
+                        "freshness_unknown": False,
+                        "is_stale_candidate": False,
+                        "is_old_news": False,
+                    }
+                    for index in range(4)
+                ],
+            }
+        )
+
+        grok_shortlist = mock_grok_rerank.call_args.args[0]
+        self.assertEqual(len(grok_shortlist), 2)
+        self.assertEqual(result["grok_stage_usage"]["delivery_rerank"]["shortlist_size"], 2)
+        self.assertTrue(all(not article["grok_rerank_applied"] for article in result["final_articles"]))
+
+    @patch("digest.workflow.nodes.delivery_judge.grok_delivery_max_articles", return_value=2)
+    @patch("digest.workflow.nodes.delivery_judge.rerank_delivery_articles", return_value={})
+    @patch("digest.workflow.nodes.delivery_judge.grok_delivery_enabled", return_value=True)
+    @patch("digest.workflow.nodes.delivery_judge.grok_final_editor_enabled", return_value=False)
+    @patch("digest.workflow.nodes.delivery_judge.run_json_inference")
+    def test_delivery_judge_falls_back_to_local_when_grok_rerank_returns_empty(
+        self,
+        mock_local_judge,
+        _mock_final_editor_enabled,
+        _mock_grok_enabled,
+        _mock_grok_rerank,
+        _mock_grok_limit,
+    ) -> None:
+        mock_local_judge.return_value = {
+            "groundedness_score": 4,
+            "freshness_score": 4,
+            "operator_value_score": 4,
+            "decision": "include",
+            "rationale": "Đủ mạnh để đưa vào brief.",
+        }
+
+        result = delivery_judge_node(
+            {
+                "runtime_config": {"use_grok_for_delivery_rerank": True},
+                "final_articles": [
+                    {
+                        "title": "Fallback article",
+                        "url": "https://example.com/fallback",
+                        "source": "RSS: Example",
+                        "source_domain": "example.com",
+                        "primary_type": "Product",
+                        "total_score": 82,
+                        "content_available": True,
+                        "source_verified": True,
+                        "source_tier": "a",
+                        "is_ai_relevant": True,
+                        "event_is_primary": True,
+                        "freshness_unknown": False,
+                        "is_stale_candidate": False,
+                        "is_old_news": False,
+                    }
+                ],
+            }
+        )
+
+        self.assertFalse(result["final_articles"][0]["grok_rerank_applied"])
+        self.assertEqual(result["grok_stage_usage"]["delivery_rerank"]["fallback_count"], 1)
 
     @patch("digest.workflow.nodes.delivery_judge.grok_delivery_max_articles", return_value=3)
     @patch("digest.workflow.nodes.delivery_judge.rerank_delivery_articles")
@@ -1313,64 +1415,67 @@ class EditorialGuardrailsTest(unittest.TestCase):
             }
         }
 
-        result = summarize_vn_node(
-            {
-                "run_mode": "publish",
-                "runtime_config": {"enable_grok_news_copy": True},
-                "telegram_candidates": [
-                    {
-                        "title": "One product update",
-                        "url": "https://example.com/product",
-                        "primary_type": "Product",
-                        "primary_emoji": "🚀",
-                        "note_summary_vi": "Có cập nhật sản phẩm mới cho team AI.",
-                        "total_score": 71,
-                        "source": "RSS: Example",
-                        "source_domain": "example.com",
-                        "content_available": True,
-                        "source_verified": True,
-                        "source_tier": "a",
-                        "delivery_decision": "include",
-                    }
-                ],
-                "notion_pages": [],
-            }
-        )
+        state = {
+            "run_mode": "publish",
+            "runtime_config": {"enable_grok_news_copy": True},
+            "telegram_candidates": [
+                {
+                    "title": "One product update",
+                    "url": "https://example.com/product",
+                    "primary_type": "Product",
+                    "primary_emoji": "🚀",
+                    "note_summary_vi": "Có cập nhật sản phẩm mới cho team AI.",
+                    "total_score": 71,
+                    "source": "RSS: Example",
+                    "source_domain": "example.com",
+                    "content_available": True,
+                    "source_verified": True,
+                    "source_tier": "a",
+                    "delivery_decision": "include",
+                }
+            ],
+            "notion_pages": [],
+        }
+        result = summarize_vn_node(state)
 
         product_message = next(message for message in result["telegram_messages"] if "🚀 Product" in message)
         self.assertIn("bổ sung khả năng tự động hóa tác vụ", product_message)
+        self.assertTrue(state["telegram_candidates"][0]["grok_polish_applied"])
+        self.assertEqual(state["telegram_candidates"][0]["copy_source_used"], "grok_polish")
+        self.assertEqual(result["grok_stage_usage"]["final_polish"]["polished_count"], 1)
 
     @patch("digest.workflow.nodes.summarize_vn.grok_news_copy_enabled", return_value=False)
     @patch("digest.workflow.nodes.summarize_vn.get_history", return_value=[])
     def test_summarize_vn_uses_structured_copy_when_grok_disabled(self, _mock_history, _mock_grok_enabled) -> None:
-        result = summarize_vn_node(
-            {
-                "run_mode": "publish",
-                "telegram_candidates": [
-                    {
-                        "title": "One product update",
-                        "url": "https://example.com/product",
-                        "primary_type": "Product",
-                        "primary_emoji": "🚀",
-                        "factual_summary_vi": "OpenAI vừa cập nhật sản phẩm kiểm soát vận hành AI.",
-                        "why_it_matters_vi": "Điểm đáng chú ý là có thêm bước approval loop giúp đội vận hành giảm lỗi.",
-                        "optional_editorial_angle": "Bài này giúp nhóm triển khai workflow AI.",
-                        "total_score": 74,
-                        "source": "RSS: Example",
-                        "source_domain": "example.com",
-                        "content_available": True,
-                        "source_verified": True,
-                        "source_tier": "a",
-                        "delivery_decision": "include",
-                    }
-                ],
-                "notion_pages": [],
-            }
-        )
+        state = {
+            "run_mode": "publish",
+            "telegram_candidates": [
+                {
+                    "title": "One product update",
+                    "url": "https://example.com/product",
+                    "primary_type": "Product",
+                    "primary_emoji": "🚀",
+                    "factual_summary_vi": "OpenAI vừa cập nhật sản phẩm kiểm soát vận hành AI.",
+                    "why_it_matters_vi": "Điểm đáng chú ý là có thêm bước approval loop giúp đội vận hành giảm lỗi.",
+                    "optional_editorial_angle": "Bài này giúp nhóm triển khai workflow AI.",
+                    "total_score": 74,
+                    "source": "RSS: Example",
+                    "source_domain": "example.com",
+                    "content_available": True,
+                    "source_verified": True,
+                    "source_tier": "a",
+                    "delivery_decision": "include",
+                }
+            ],
+            "notion_pages": [],
+        }
+        result = summarize_vn_node(state)
 
         product_message = next(message for message in result["telegram_messages"] if "🚀 Product" in message)
         self.assertIn("OpenAI vừa cập nhật sản phẩm kiểm soát vận hành AI", product_message)
         self.assertIn("approval loop", product_message)
+        self.assertFalse(state["telegram_candidates"][0]["grok_polish_applied"])
+        self.assertEqual(state["telegram_candidates"][0]["copy_source_used"], "structured_local")
 
     @patch("digest.workflow.nodes.summarize_vn.rewrite_news_blurbs", side_effect=RuntimeError("grok_down"))
     @patch("digest.workflow.nodes.summarize_vn.grok_news_copy_enabled", return_value=True)
@@ -1383,34 +1488,36 @@ class EditorialGuardrailsTest(unittest.TestCase):
     ) -> None:
         del _mock_rewrite
         del _mock_enabled
-        result = summarize_vn_node(
-            {
-                "run_mode": "publish",
-                "runtime_config": {"enable_grok_news_copy": True},
-                "telegram_candidates": [
-                    {
-                        "title": "Local-first rollout update",
-                        "url": "https://example.com/local-first",
-                        "primary_type": "Product",
-                        "primary_emoji": "🚀",
-                        "factual_summary_vi": "OpenAI cập nhật mới cho triển khai on-device.",
-                        "why_it_matters_vi": "Điểm đáng chú ý là bài viết cho thấy cách giảm chi phí vận hành.",
-                        "total_score": 76,
-                        "source": "RSS: Example",
-                        "source_domain": "example.com",
-                        "content_available": True,
-                        "source_verified": True,
-                        "source_tier": "a",
-                        "delivery_decision": "include",
-                    }
-                ],
-                "notion_pages": [],
-            }
-        )
+        state = {
+            "run_mode": "publish",
+            "runtime_config": {"enable_grok_news_copy": True},
+            "telegram_candidates": [
+                {
+                    "title": "Local-first rollout update",
+                    "url": "https://example.com/local-first",
+                    "primary_type": "Product",
+                    "primary_emoji": "🚀",
+                    "factual_summary_vi": "OpenAI cập nhật mới cho triển khai on-device.",
+                    "why_it_matters_vi": "Điểm đáng chú ý là bài viết cho thấy cách giảm chi phí vận hành.",
+                    "total_score": 76,
+                    "source": "RSS: Example",
+                    "source_domain": "example.com",
+                    "content_available": True,
+                    "source_verified": True,
+                    "source_tier": "a",
+                    "delivery_decision": "include",
+                }
+            ],
+            "notion_pages": [],
+        }
+        result = summarize_vn_node(state)
 
         product_message = next(message for message in result["telegram_messages"] if "🚀 Product" in message)
         self.assertIn("OpenAI cập nhật mới cho triển khai on-device", product_message)
         self.assertIn("giảm chi phí vận hành", product_message)
+        self.assertFalse(state["telegram_candidates"][0]["grok_polish_applied"])
+        self.assertEqual(state["telegram_candidates"][0]["copy_source_used"], "structured_local_fallback")
+        self.assertEqual(result["grok_stage_usage"]["final_polish"]["fallback_count"], 1)
 
     def test_build_telegram_copy_from_structured_is_concise_and_coherent(self) -> None:
         message = build_telegram_copy_from_structured(
@@ -2139,6 +2246,64 @@ class EditorialGuardrailsTest(unittest.TestCase):
         self.assertIn("Token-waste hotspots", markdown)
         self.assertIn("Future parallelization opportunities", markdown)
 
+    def test_build_run_report_markdown_includes_grok_usage_section(self) -> None:
+        state = {
+            "run_mode": "preview",
+            "raw_articles": [{"title": "A", "source": "RSS: Example", "source_domain": "example.com"}],
+            "new_articles": [{"title": "A"}],
+            "scored_articles": [
+                {
+                    "title": "A",
+                    "primary_type": "Product",
+                    "classify_provider_used": "local_then_grok",
+                    "prefilter_score": 70,
+                    "c1_score": 20,
+                    "c2_score": 18,
+                    "c3_score": 17,
+                    "base_total_score": 55,
+                    "adjusted_total_score": 55,
+                    "score_breakdown": {"why_surfaced": ["strong source"]},
+                }
+            ],
+            "top_articles": [],
+            "low_score_articles": [],
+            "final_articles": [],
+            "telegram_candidates": [],
+            "notion_pages": [],
+            "grok_stage_usage": {
+                "classify": {
+                    "enabled": True,
+                    "request_count": 2,
+                    "success_count": 1,
+                    "fallback_count": 1,
+                    "items_processed": 2,
+                    "local_failure_count": 1,
+                    "grok_rescue_count": 1,
+                    "provider_local_then_grok_count": 1,
+                },
+                "delivery_rerank": {
+                    "enabled": True,
+                    "request_count": 1,
+                    "success_count": 1,
+                    "fallback_count": 0,
+                    "items_processed": 6,
+                    "shortlist_size": 6,
+                    "applied": True,
+                },
+            },
+            "grok_request_count": 3,
+            "grok_success_count": 2,
+            "grok_fallback_count": 1,
+            "grok_items_processed": 8,
+        }
+
+        markdown = _build_run_report_markdown(state, datetime(2026, 3, 27, tzinfo=timezone.utc))
+
+        self.assertIn("## Grok Usage", markdown)
+        self.assertIn("classify: enabled=True requests=2 success=1 fallback=1 items=2", markdown)
+        self.assertIn("delivery_rerank: enabled=True requests=1 success=1 fallback=0 items=6", markdown)
+        self.assertIn("classify_provider=local_then_grok", markdown)
+
     def test_build_run_report_markdown_includes_facebook_discovery_and_skip_breakdown(self) -> None:
         state = {
             "run_mode": "preview",
@@ -2334,12 +2499,18 @@ class EditorialGuardrailsTest(unittest.TestCase):
         self.assertTrue(config["enable_hn"])
         self.assertTrue(config["enable_reddit"])
         self.assertTrue(config["enable_telegram_channels"])
+        self.assertFalse(config["use_grok_for_classify"])
+        self.assertEqual(config["grok_classify_mode"], "retry")
+        self.assertTrue(config["use_grok_for_delivery_rerank"])
         self.assertTrue(config["enable_grok_delivery_judge"])
         self.assertTrue(config["enable_grok_prefilter"])
         self.assertTrue(config["enable_grok_final_editor"])
+        self.assertTrue(config["use_grok_for_final_polish"])
         self.assertTrue(config["enable_grok_news_copy"])
         self.assertFalse(config["enable_grok_facebook_score"])
+        self.assertTrue(config["use_grok_for_source_gap"])
         self.assertTrue(config["enable_grok_source_gap"])
+        self.assertTrue(config["use_grok_for_scout"])
         self.assertTrue(config["enable_grok_scout"])
         self.assertTrue(config["enable_grok_x_scout"])
         self.assertLessEqual(config["grok_scout_max_queries"], 3)
@@ -3501,8 +3672,136 @@ class EditorialGuardrailsTest(unittest.TestCase):
         self.assertEqual(mock_run_json.call_count, 0)
 
     @patch("digest.workflow.nodes.classify_and_score.write_temporal_snapshot", return_value="reports/mock.json")
+    @patch("digest.workflow.nodes.classify_and_score.call_xai_structured_json")
     @patch("digest.workflow.nodes.classify_and_score.run_json_inference")
-    def test_classify_node_keeps_valid_structured_json(self, mock_run_json, _mock_snapshot) -> None:
+    def test_classify_node_uses_grok_retry_after_local_json_failure(
+        self,
+        mock_run_json,
+        mock_grok_json,
+        _mock_snapshot,
+    ) -> None:
+        mock_run_json.side_effect = [
+            (None, "", False),
+            (None, "", False),
+            (None, "", False),
+        ]
+        mock_grok_json.return_value = {
+            "primary_type": "Product",
+            "primary_emoji": "🚀",
+            "c1_score": 24,
+            "c1_reason": "Nguồn mạnh và JSON ổn định.",
+            "c2_score": 21,
+            "c2_reason": "Hữu ích cho team vận hành AI.",
+            "c3_score": 19,
+            "c3_reason": "Fit với hướng agent workflow.",
+            "summary_vi": "OpenAI công bố orchestration update cho agent workflow enterprise.",
+            "factual_summary_vi": "OpenAI công bố orchestration update mới cho workflow enterprise.",
+            "editorial_angle": "Đây là cập nhật platform đáng theo dõi cho builder.",
+            "why_it_matters_vi": "Nó giúp đội vận hành agent kiểm soát flow ổn định hơn.",
+            "optional_editorial_angle": "Tín hiệu tích cực cho team đang productize agent.",
+            "analysis_tier": "deep",
+            "tags": ["api_platform", "ai_agents"],
+            "relevance_level": "High",
+        }
+
+        result = classify_and_score_node(
+            {
+                "new_articles": [
+                    {
+                        "title": "OpenAI ships orchestration controls for agents",
+                        "url": "https://example.com/grok-classify",
+                        "source": "OpenAI",
+                        "source_domain": "openai.com",
+                        "source_tier": "a",
+                        "source_kind": "official",
+                        "source_verified": True,
+                        "content_available": True,
+                        "content": "OpenAI shipped orchestration controls for enterprise agent workflows.",
+                        "snippet": "OpenAI shipped orchestration controls for enterprise agent workflows.",
+                        "published_at": "2026-04-06T00:00:00+00:00",
+                        "published_at_source": "source_metadata",
+                        "freshness_bucket": "fresh",
+                        "is_ai_relevant": True,
+                        "event_is_primary": True,
+                    }
+                ],
+                "runtime_config": {
+                    "max_classify_articles": 5,
+                    "max_deep_analysis_articles": 3,
+                    "use_grok_for_classify": True,
+                },
+                "feedback_summary_text": "",
+                "feedback_preference_profile": {},
+            }
+        )
+
+        article = result["scored_articles"][0]
+        self.assertEqual(article["classify_provider_used"], "local_then_grok")
+        self.assertEqual(article["classify_json_status"], "valid_json")
+        self.assertEqual(result["grok_stage_usage"]["classify"]["grok_rescue_count"], 1)
+        self.assertEqual(result["grok_stage_usage"]["classify"]["local_failure_count"], 1)
+        self.assertEqual(result["grok_request_count"], 1)
+        self.assertEqual(result["grok_success_count"], 1)
+        self.assertEqual(mock_grok_json.call_count, 1)
+
+    @patch("digest.workflow.nodes.classify_and_score.write_temporal_snapshot", return_value="reports/mock.json")
+    @patch("digest.workflow.nodes.classify_and_score.call_xai_structured_json", return_value={})
+    @patch("digest.workflow.nodes.classify_and_score.run_json_inference")
+    def test_classify_node_falls_back_safely_when_grok_retry_returns_empty(
+        self,
+        mock_run_json,
+        _mock_grok_json,
+        _mock_snapshot,
+    ) -> None:
+        mock_run_json.side_effect = [
+            (None, "", False),
+            (None, "", False),
+            (None, "", False),
+        ]
+
+        result = classify_and_score_node(
+            {
+                "new_articles": [
+                    {
+                        "title": "Unknown AI update",
+                        "url": "https://example.com/grok-empty",
+                        "source": "Blog",
+                        "source_domain": "example.com",
+                        "source_tier": "b",
+                        "source_kind": "unknown",
+                        "source_verified": False,
+                        "content_available": True,
+                        "content": "Some AI update.",
+                        "snippet": "Some AI update.",
+                        "published_at": "2026-04-06T00:00:00+00:00",
+                        "published_at_source": "source_metadata",
+                        "freshness_bucket": "fresh",
+                        "is_ai_relevant": True,
+                        "event_is_primary": True,
+                    }
+                ],
+                "runtime_config": {
+                    "max_classify_articles": 5,
+                    "max_deep_analysis_articles": 3,
+                    "use_grok_for_classify": True,
+                },
+                "feedback_summary_text": "",
+                "feedback_preference_profile": {},
+            }
+        )
+
+        article = result["scored_articles"][0]
+        self.assertEqual(article["classify_provider_used"], "local_then_grok")
+        self.assertIn(article["classify_json_status"], {"partial_recovery", "hard_fallback"})
+        self.assertTrue(article["summary_vi"])
+        self.assertEqual(result["grok_stage_usage"]["classify"]["fallback_count"], 1)
+        self.assertEqual(result["grok_request_count"], 1)
+        self.assertEqual(result["grok_fallback_count"], 1)
+
+    @patch("digest.workflow.nodes.classify_and_score.write_temporal_snapshot", return_value="reports/mock.json")
+    @patch("digest.workflow.nodes.classify_and_score.call_xai_structured_json")
+    @patch("digest.workflow.nodes.classify_and_score.run_json_inference")
+    def test_classify_node_keeps_valid_structured_json(self, mock_run_json, mock_grok_json, _mock_snapshot) -> None:
         mock_run_json.return_value = {
             "primary_type": "Product",
             "primary_emoji": "🚀",
@@ -3555,6 +3854,7 @@ class EditorialGuardrailsTest(unittest.TestCase):
         self.assertEqual(article["why_it_matters_vi"], "Nó giúp đội vận hành agent có thêm primitive để kiểm soát flow.")
         self.assertEqual(article["optional_editorial_angle"], "Tín hiệu cho các team đang productize agent.")
         self.assertNotIn("classify hiện tại không trả JSON ổn định", article["summary_vi"])
+        mock_grok_json.assert_not_called()
 
     @patch("digest.workflow.nodes.classify_and_score.write_temporal_snapshot", return_value="reports/mock.json")
     @patch("digest.workflow.nodes.classify_and_score.run_json_inference")

@@ -1,5 +1,5 @@
 #!/bin/bash
-# setup_scheduler.sh — Cài đặt lịch chạy tự động 8:00 AM hàng ngày cho Daily Digest Agent
+# setup_scheduler.sh — Cài đặt lịch chạy tự động 7:30 AM hàng ngày cho Daily Digest Agent
 
 set -e
 
@@ -49,7 +49,7 @@ echo "   ✅ MLX_MODEL: $MLX_MODEL"
 
 # 4. Đăng ký launchd
 echo ""
-echo "✅ [4/4] Đăng ký lịch chạy 8:00 AM với launchd..."
+echo "✅ [4/4] Đăng ký lịch chạy 7:30 AM với launchd..."
 
 # Gỡ bỏ cũ nếu có
 launchctl unload "$PLIST_DEST" 2>/dev/null || true
@@ -72,7 +72,7 @@ fi
 
 echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo "🎉 HOÀN TẤT! Agent sẽ tự động chạy lúc 8:00 AM mỗi ngày."
+echo "🎉 HOÀN TẤT! Agent sẽ tự động chạy lúc 7:30 AM mỗi ngày."
 echo ""
 echo "📋 Các lệnh hữu ích:"
 echo "   Xem log realtime:  tail -f $PROJECT_DIR/digest.log"

@@ -40,6 +40,7 @@ DEFAULT_GROK_SCOUT_MAX_QUERIES = 2
 DEFAULT_GROK_SCOUT_MAX_ARTICLES = 6
 DEFAULT_GROK_X_SCOUT_MAX_QUERIES = 2
 DEFAULT_GROK_X_SCOUT_MAX_ARTICLES = 6
+DEFAULT_GROK_CLASSIFY_MODE = "retry"
 
 BOOL_FALSE_VALUES = {"0", "false", "no", "off"}
 
@@ -368,16 +369,37 @@ GROK_X_SCOUT_SCHEMA: dict[str, Any] = {
 }
 
 
+def _configured_value(
+    runtime_config: dict[str, Any] | None,
+    *,
+    runtime_keys: tuple[str, ...],
+    env_keys: tuple[str, ...],
+) -> Any:
+    config = dict(runtime_config or {})
+    for runtime_key in runtime_keys:
+        raw = config.get(runtime_key)
+        if raw not in (None, ""):
+            return raw
+    for env_key in env_keys:
+        raw = os.getenv(env_key, "")
+        if raw not in (None, ""):
+            return raw
+    return None
+
+
 def _feature_enabled(
     runtime_config: dict[str, Any] | None,
     *,
-    runtime_key: str,
-    env_key: str,
+    runtime_keys: tuple[str, ...],
+    env_keys: tuple[str, ...],
 ) -> bool:
-    config = dict(runtime_config or {})
-    raw = config.get(runtime_key)
+    raw = _configured_value(
+        runtime_config,
+        runtime_keys=runtime_keys,
+        env_keys=env_keys,
+    )
     if raw in (None, ""):
-        raw = os.getenv(env_key, "")
+        return False
     if str(raw).strip().lower() in BOOL_FALSE_VALUES:
         return False
     return bool(os.getenv("XAI_API_KEY", "").strip())
@@ -386,64 +408,84 @@ def _feature_enabled(
 def grok_delivery_enabled(runtime_config: dict[str, Any] | None = None) -> bool:
     return _feature_enabled(
         runtime_config,
-        runtime_key="enable_grok_delivery_judge",
-        env_key="GROK_DELIVERY_JUDGE_ENABLED",
+        runtime_keys=("use_grok_for_delivery_rerank", "enable_grok_delivery_judge"),
+        env_keys=("USE_GROK_FOR_DELIVERY_RERANK", "GROK_DELIVERY_JUDGE_ENABLED"),
     )
 
 
 def grok_prefilter_enabled(runtime_config: dict[str, Any] | None = None) -> bool:
     return _feature_enabled(
         runtime_config,
-        runtime_key="enable_grok_prefilter",
-        env_key="GROK_PREFILTER_ENABLED",
+        runtime_keys=("enable_grok_prefilter",),
+        env_keys=("GROK_PREFILTER_ENABLED",),
     )
 
 
 def grok_final_editor_enabled(runtime_config: dict[str, Any] | None = None) -> bool:
     return _feature_enabled(
         runtime_config,
-        runtime_key="enable_grok_final_editor",
-        env_key="GROK_FINAL_EDITOR_ENABLED",
+        runtime_keys=("enable_grok_final_editor",),
+        env_keys=("GROK_FINAL_EDITOR_ENABLED",),
     )
 
 
 def grok_news_copy_enabled(runtime_config: dict[str, Any] | None = None) -> bool:
     return _feature_enabled(
         runtime_config,
-        runtime_key="enable_grok_news_copy",
-        env_key="GROK_NEWS_COPY_ENABLED",
+        runtime_keys=("use_grok_for_final_polish", "enable_grok_news_copy"),
+        env_keys=("USE_GROK_FOR_FINAL_POLISH", "GROK_NEWS_COPY_ENABLED"),
     )
 
 
 def grok_facebook_score_enabled(runtime_config: dict[str, Any] | None = None) -> bool:
     return _feature_enabled(
         runtime_config,
-        runtime_key="enable_grok_facebook_score",
-        env_key="GROK_FACEBOOK_SCORE_ENABLED",
+        runtime_keys=("enable_grok_facebook_score",),
+        env_keys=("GROK_FACEBOOK_SCORE_ENABLED",),
     )
+
+
+def grok_classify_enabled(runtime_config: dict[str, Any] | None = None) -> bool:
+    return _feature_enabled(
+        runtime_config,
+        runtime_keys=("use_grok_for_classify", "enable_grok_classify"),
+        env_keys=("USE_GROK_FOR_CLASSIFY", "GROK_CLASSIFY_ENABLED"),
+    )
+
+
+def grok_classify_mode(runtime_config: dict[str, Any] | None = None) -> str:
+    raw = _configured_value(
+        runtime_config,
+        runtime_keys=("grok_classify_mode",),
+        env_keys=("GROK_CLASSIFY_MODE",),
+    )
+    mode = str(raw or DEFAULT_GROK_CLASSIFY_MODE).strip().lower()
+    if mode not in {"retry", "benchmark"}:
+        return DEFAULT_GROK_CLASSIFY_MODE
+    return mode
 
 
 def grok_source_gap_enabled(runtime_config: dict[str, Any] | None = None) -> bool:
     return _feature_enabled(
         runtime_config,
-        runtime_key="enable_grok_source_gap",
-        env_key="GROK_SOURCE_GAP_ENABLED",
+        runtime_keys=("use_grok_for_source_gap", "enable_grok_source_gap"),
+        env_keys=("USE_GROK_FOR_SOURCE_GAP", "GROK_SOURCE_GAP_ENABLED"),
     )
 
 
 def grok_scout_enabled(runtime_config: dict[str, Any] | None = None) -> bool:
     return _feature_enabled(
         runtime_config,
-        runtime_key="enable_grok_scout",
-        env_key="GROK_SCOUT_ENABLED",
+        runtime_keys=("use_grok_for_scout", "enable_grok_scout"),
+        env_keys=("USE_GROK_FOR_SCOUT", "GROK_SCOUT_ENABLED"),
     )
 
 
 def grok_x_scout_enabled(runtime_config: dict[str, Any] | None = None) -> bool:
     return _feature_enabled(
         runtime_config,
-        runtime_key="enable_grok_x_scout",
-        env_key="GROK_X_SCOUT_ENABLED",
+        runtime_keys=("use_grok_for_scout", "enable_grok_x_scout"),
+        env_keys=("USE_GROK_FOR_SCOUT", "GROK_X_SCOUT_ENABLED"),
     )
 
 
@@ -454,15 +496,18 @@ def grok_delivery_model() -> str:
 def _feature_max_articles(
     runtime_config: dict[str, Any] | None,
     *,
-    runtime_key: str,
-    env_key: str,
+    runtime_keys: tuple[str, ...],
+    env_keys: tuple[str, ...],
     default: int,
     hard_cap: int = 24,
 ) -> int:
-    config = dict(runtime_config or {})
-    raw = config.get(runtime_key)
+    raw = _configured_value(
+        runtime_config,
+        runtime_keys=runtime_keys,
+        env_keys=env_keys,
+    )
     if raw in (None, ""):
-        raw = os.getenv(env_key, str(default))
+        raw = str(default)
     try:
         return max(1, min(hard_cap, int(raw)))
     except (TypeError, ValueError):
@@ -472,8 +517,8 @@ def _feature_max_articles(
 def grok_delivery_max_articles(runtime_config: dict[str, Any] | None = None) -> int:
     return _feature_max_articles(
         runtime_config,
-        runtime_key="grok_delivery_max_articles",
-        env_key="GROK_DELIVERY_MAX_ARTICLES",
+        runtime_keys=("grok_delivery_rerank_max_articles", "grok_delivery_max_articles"),
+        env_keys=("GROK_DELIVERY_RERANK_MAX_ARTICLES", "GROK_DELIVERY_MAX_ARTICLES"),
         default=DEFAULT_GROK_DELIVERY_MAX_ARTICLES,
         hard_cap=20,
     )
@@ -482,8 +527,8 @@ def grok_delivery_max_articles(runtime_config: dict[str, Any] | None = None) -> 
 def grok_prefilter_max_articles(runtime_config: dict[str, Any] | None = None) -> int:
     return _feature_max_articles(
         runtime_config,
-        runtime_key="grok_prefilter_max_articles",
-        env_key="GROK_PREFILTER_MAX_ARTICLES",
+        runtime_keys=("grok_prefilter_max_articles",),
+        env_keys=("GROK_PREFILTER_MAX_ARTICLES",),
         default=DEFAULT_GROK_PREFILTER_MAX_ARTICLES,
         hard_cap=24,
     )
@@ -492,8 +537,8 @@ def grok_prefilter_max_articles(runtime_config: dict[str, Any] | None = None) ->
 def grok_final_editor_max_articles(runtime_config: dict[str, Any] | None = None) -> int:
     return _feature_max_articles(
         runtime_config,
-        runtime_key="grok_final_editor_max_articles",
-        env_key="GROK_FINAL_EDITOR_MAX_ARTICLES",
+        runtime_keys=("grok_final_editor_max_articles",),
+        env_keys=("GROK_FINAL_EDITOR_MAX_ARTICLES",),
         default=DEFAULT_GROK_FINAL_EDITOR_MAX_ARTICLES,
         hard_cap=12,
     )
@@ -502,8 +547,8 @@ def grok_final_editor_max_articles(runtime_config: dict[str, Any] | None = None)
 def grok_news_copy_max_articles(runtime_config: dict[str, Any] | None = None) -> int:
     return _feature_max_articles(
         runtime_config,
-        runtime_key="grok_news_copy_max_articles",
-        env_key="GROK_NEWS_COPY_MAX_ARTICLES",
+        runtime_keys=("grok_final_polish_max_articles", "grok_news_copy_max_articles"),
+        env_keys=("GROK_FINAL_POLISH_MAX_ARTICLES", "GROK_NEWS_COPY_MAX_ARTICLES"),
         default=DEFAULT_GROK_NEWS_COPY_MAX_ARTICLES,
         hard_cap=24,
     )
@@ -512,8 +557,8 @@ def grok_news_copy_max_articles(runtime_config: dict[str, Any] | None = None) ->
 def grok_facebook_max_articles(runtime_config: dict[str, Any] | None = None) -> int:
     return _feature_max_articles(
         runtime_config,
-        runtime_key="grok_facebook_max_articles",
-        env_key="GROK_FACEBOOK_MAX_ARTICLES",
+        runtime_keys=("grok_facebook_max_articles",),
+        env_keys=("GROK_FACEBOOK_MAX_ARTICLES",),
         default=DEFAULT_GROK_FACEBOOK_MAX_ARTICLES,
         hard_cap=12,
     )
@@ -522,8 +567,8 @@ def grok_facebook_max_articles(runtime_config: dict[str, Any] | None = None) -> 
 def grok_source_gap_max_articles(runtime_config: dict[str, Any] | None = None) -> int:
     return _feature_max_articles(
         runtime_config,
-        runtime_key="grok_source_gap_max_articles",
-        env_key="GROK_SOURCE_GAP_MAX_ARTICLES",
+        runtime_keys=("grok_source_gap_max_articles",),
+        env_keys=("GROK_SOURCE_GAP_MAX_ARTICLES",),
         default=DEFAULT_GROK_SOURCE_GAP_MAX_ARTICLES,
         hard_cap=18,
     )
@@ -536,8 +581,8 @@ def grok_scout_model() -> str:
 def grok_scout_max_queries(runtime_config: dict[str, Any] | None = None) -> int:
     return _feature_max_articles(
         runtime_config,
-        runtime_key="grok_scout_max_queries",
-        env_key="GROK_SCOUT_MAX_QUERIES",
+        runtime_keys=("grok_scout_max_queries",),
+        env_keys=("GROK_SCOUT_MAX_QUERIES",),
         default=DEFAULT_GROK_SCOUT_MAX_QUERIES,
         hard_cap=4,
     )
@@ -546,8 +591,8 @@ def grok_scout_max_queries(runtime_config: dict[str, Any] | None = None) -> int:
 def grok_scout_max_articles(runtime_config: dict[str, Any] | None = None) -> int:
     return _feature_max_articles(
         runtime_config,
-        runtime_key="grok_scout_max_articles",
-        env_key="GROK_SCOUT_MAX_ARTICLES",
+        runtime_keys=("grok_scout_max_articles",),
+        env_keys=("GROK_SCOUT_MAX_ARTICLES",),
         default=DEFAULT_GROK_SCOUT_MAX_ARTICLES,
         hard_cap=10,
     )
@@ -556,8 +601,8 @@ def grok_scout_max_articles(runtime_config: dict[str, Any] | None = None) -> int
 def grok_x_scout_max_queries(runtime_config: dict[str, Any] | None = None) -> int:
     return _feature_max_articles(
         runtime_config,
-        runtime_key="grok_x_scout_max_queries",
-        env_key="GROK_X_SCOUT_MAX_QUERIES",
+        runtime_keys=("grok_x_scout_max_queries",),
+        env_keys=("GROK_X_SCOUT_MAX_QUERIES",),
         default=DEFAULT_GROK_X_SCOUT_MAX_QUERIES,
         hard_cap=4,
     )
@@ -566,8 +611,8 @@ def grok_x_scout_max_queries(runtime_config: dict[str, Any] | None = None) -> in
 def grok_x_scout_max_articles(runtime_config: dict[str, Any] | None = None) -> int:
     return _feature_max_articles(
         runtime_config,
-        runtime_key="grok_x_scout_max_articles",
-        env_key="GROK_X_SCOUT_MAX_ARTICLES",
+        runtime_keys=("grok_x_scout_max_articles",),
+        env_keys=("GROK_X_SCOUT_MAX_ARTICLES",),
         default=DEFAULT_GROK_X_SCOUT_MAX_ARTICLES,
         hard_cap=10,
     )
@@ -766,6 +811,69 @@ def _call_xai_json(
     except Exception as exc:
         logger.warning("Grok JSON call failed for %s: %s", schema_name, exc)
         return {}
+
+
+def call_xai_structured_json(
+    *,
+    system_prompt: str,
+    user_prompt: str,
+    schema_name: str,
+    schema: dict[str, Any],
+    max_tokens: int,
+) -> dict[str, Any]:
+    return _call_xai_json(
+        system_prompt=system_prompt,
+        user_prompt=user_prompt,
+        schema_name=schema_name,
+        schema=schema,
+        max_tokens=max_tokens,
+    )
+
+
+def merge_grok_observability(
+    container: dict[str, Any] | None,
+    *,
+    stage: str,
+    enabled: bool,
+    request_count: int = 0,
+    success_count: int = 0,
+    fallback_count: int = 0,
+    items_processed: int = 0,
+    applied: bool | None = None,
+    extra: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    state = dict(container or {})
+    stage_usage = {
+        str(key): dict(value or {})
+        for key, value in dict(state.get("grok_stage_usage", {}) or {}).items()
+        if str(key).strip()
+    }
+    stage_entry = dict(stage_usage.get(stage, {}) or {})
+    stage_entry["enabled"] = bool(enabled)
+    stage_entry["request_count"] = int(stage_entry.get("request_count", 0) or 0) + int(request_count or 0)
+    stage_entry["success_count"] = int(stage_entry.get("success_count", 0) or 0) + int(success_count or 0)
+    stage_entry["fallback_count"] = int(stage_entry.get("fallback_count", 0) or 0) + int(fallback_count or 0)
+    stage_entry["items_processed"] = int(stage_entry.get("items_processed", 0) or 0) + int(items_processed or 0)
+    if applied is not None:
+        stage_entry["applied"] = bool(stage_entry.get("applied", False) or applied)
+    if extra:
+        for key, value in extra.items():
+            previous = stage_entry.get(key)
+            if isinstance(value, bool):
+                stage_entry[key] = bool(previous or value)
+            elif isinstance(value, int):
+                stage_entry[key] = int(previous or 0) + value
+            else:
+                stage_entry[key] = value
+    stage_usage[stage] = stage_entry
+
+    return {
+        "grok_stage_usage": stage_usage,
+        "grok_request_count": int(state.get("grok_request_count", 0) or 0) + int(request_count or 0),
+        "grok_success_count": int(state.get("grok_success_count", 0) or 0) + int(success_count or 0),
+        "grok_fallback_count": int(state.get("grok_fallback_count", 0) or 0) + int(fallback_count or 0),
+        "grok_items_processed": int(state.get("grok_items_processed", 0) or 0) + int(items_processed or 0),
+    }
 
 
 def _call_xai_responses_with_web_search(

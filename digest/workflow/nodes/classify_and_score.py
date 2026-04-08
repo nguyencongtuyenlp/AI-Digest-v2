@@ -45,6 +45,10 @@ from digest.editorial.editorial_guardrails import sanitize_delivery_text
 from digest.sources.source_catalog import classify_source_kind
 from digest.runtime.temporal_snapshots import write_temporal_snapshot
 from digest.runtime.xai_grok import (
+    call_xai_structured_json,
+    grok_classify_enabled,
+    grok_classify_mode,
+    merge_grok_observability,
     grok_prefilter_enabled,
     grok_prefilter_max_articles,
     rerank_prefilter_articles,
@@ -1296,15 +1300,35 @@ def _classify_prose_rescue(article: dict[str, Any], raw: str, min_score: int) ->
         missing_fields=list(CLASSIFY_TEXT_FIELDS),
         recovered_fields=["summary_vi", "factual_summary_vi", "why_it_matters_vi", "optional_editorial_angle", "editorial_angle"],
     )
+    article["classify_provider_used"] = str(article.get("classify_provider_used", "local") or "local")
 
 
-def _resolve_classify_inference(
+def _call_grok_classify_inference(
+    user_prompt: str,
+    *,
+    max_tokens: int,
+) -> dict[str, Any] | None:
+    schema = dict(CLASSIFY_RESPONSE_FORMAT.get("json_schema", {}).get("schema", {}))
+    if not schema:
+        return None
+    parsed = call_xai_structured_json(
+        system_prompt=CLASSIFY_SCORE_SYSTEM,
+        user_prompt=user_prompt,
+        schema_name="grok_classify_score_article",
+        schema=schema,
+        max_tokens=max_tokens,
+    )
+    return parsed if isinstance(parsed, dict) and parsed else None
+
+
+def _resolve_classify_inference_details(
     user_prompt: str,
     *,
     max_tokens: int,
     temperature: float,
     initial_response: Any | None = None,
-) -> tuple[dict[str, Any] | None, str | None, str]:
+    runtime_config: dict[str, Any] | None = None,
+) -> tuple[dict[str, Any] | None, str | None, str, str, dict[str, Any]]:
     def _parsed_or_repaired(response: Any) -> tuple[dict[str, Any] | None, str | None, str, bool]:
         parsed, raw, looks_structured = _normalize_classify_inference_response(response)
         if parsed and isinstance(parsed, dict):
@@ -1313,6 +1337,20 @@ def _resolve_classify_inference(
         if repaired and isinstance(repaired, dict):
             return repaired, CLASSIFY_JSON_STATUS_REPAIRED, raw, True
         return None, None, raw, looks_structured
+
+    details: dict[str, Any] = {
+        "provider_used": "local",
+        "grok_request_count": 0,
+        "grok_success_count": 0,
+        "grok_fallback_count": 0,
+        "grok_items_processed": 0,
+        "classify_local_failure_count": 0,
+        "classify_grok_rescue_count": 0,
+        "classify_benchmark_request_count": 0,
+        "classify_benchmark_success_count": 0,
+    }
+    grok_enabled = grok_classify_enabled(runtime_config)
+    classify_mode = grok_classify_mode(runtime_config)
 
     if initial_response is None:
         initial_response = run_json_inference(
@@ -1325,7 +1363,18 @@ def _resolve_classify_inference(
 
     result, status, raw, _ = _parsed_or_repaired(initial_response)
     if result is not None:
-        return result, status, raw
+        if grok_enabled and classify_mode == "benchmark":
+            details["grok_request_count"] += 1
+            details["grok_items_processed"] += 1
+            details["classify_benchmark_request_count"] += 1
+            benchmark_result = _call_grok_classify_inference(
+                user_prompt,
+                max_tokens=max_tokens,
+            )
+            if benchmark_result:
+                details["grok_success_count"] += 1
+                details["classify_benchmark_success_count"] += 1
+        return result, status, raw, str(details["provider_used"]), details
 
     logger.warning("⚠️ Classify chưa ra JSON ổn định, retry với prompt siết format.")
     retry_result, retry_status, retry_raw, retry_looks_structured = _parsed_or_repaired(
@@ -1338,7 +1387,18 @@ def _resolve_classify_inference(
         )
     )
     if retry_result is not None:
-        return retry_result, retry_status, retry_raw
+        if grok_enabled and classify_mode == "benchmark":
+            details["grok_request_count"] += 1
+            details["grok_items_processed"] += 1
+            details["classify_benchmark_request_count"] += 1
+            benchmark_result = _call_grok_classify_inference(
+                user_prompt,
+                max_tokens=max_tokens,
+            )
+            if benchmark_result:
+                details["grok_success_count"] += 1
+                details["classify_benchmark_success_count"] += 1
+        return retry_result, retry_status, retry_raw, str(details["provider_used"]), details
 
     logger.warning(
         "⚠️ Retry classify vẫn chưa ổn định (structured=%s); dùng prompt compact lần cuối.",
@@ -1354,9 +1414,54 @@ def _resolve_classify_inference(
         )
     )
     if final_result is not None:
-        return final_result, final_status, final_raw
+        if grok_enabled and classify_mode == "benchmark":
+            details["grok_request_count"] += 1
+            details["grok_items_processed"] += 1
+            details["classify_benchmark_request_count"] += 1
+            benchmark_result = _call_grok_classify_inference(
+                user_prompt,
+                max_tokens=max_tokens,
+            )
+            if benchmark_result:
+                details["grok_success_count"] += 1
+                details["classify_benchmark_success_count"] += 1
+        return final_result, final_status, final_raw, str(details["provider_used"]), details
+
+    details["classify_local_failure_count"] += 1
+    if grok_enabled:
+        details["provider_used"] = "local_then_grok"
+        details["grok_request_count"] += 1
+        details["grok_items_processed"] += 1
+        grok_result = _call_grok_classify_inference(
+            user_prompt,
+            max_tokens=max_tokens,
+        )
+        if grok_result is not None:
+            details["grok_success_count"] += 1
+            details["classify_grok_rescue_count"] += 1
+            return grok_result, CLASSIFY_JSON_STATUS_VALID, final_raw or retry_raw or raw, str(details["provider_used"]), details
+        details["grok_fallback_count"] += 1
+
     logger.debug("Last chance raw classify output: %s", final_raw[:500])
-    return None, None, final_raw or retry_raw or raw
+    return None, None, final_raw or retry_raw or raw, str(details["provider_used"]), details
+
+
+def _resolve_classify_inference(
+    user_prompt: str,
+    *,
+    max_tokens: int,
+    temperature: float,
+    initial_response: Any | None = None,
+    runtime_config: dict[str, Any] | None = None,
+) -> tuple[dict[str, Any] | None, str | None, str]:
+    result, status, raw, _provider_used, _details = _resolve_classify_inference_details(
+        user_prompt,
+        max_tokens=max_tokens,
+        temperature=temperature,
+        initial_response=initial_response,
+        runtime_config=runtime_config,
+    )
+    return result, status, raw
 
 
 def _classify_inference_with_retry(
@@ -1488,6 +1593,7 @@ def _llm_failure_fallback(article: dict[str, Any], min_score: int) -> None:
     article["summary_vi"] = sanitize_delivery_text(article.get("summary_vi", ""), max_len=260)
     article["editorial_angle"] = sanitize_delivery_text(article.get("editorial_angle", ""), max_len=180)
     _set_classify_json_debug(article, status=CLASSIFY_JSON_STATUS_FALLBACK)
+    article["classify_provider_used"] = str(article.get("classify_provider_used", "local") or "local")
 
 
 def _prefilter_score(
@@ -1922,6 +2028,7 @@ def _held_out_article_fallback(article: dict[str, Any]) -> None:
     _recompute_relevance_level(article)
     _normalize_article_tags(article)
     _set_classify_json_debug(article, status=CLASSIFY_JSON_STATUS_FALLBACK)
+    article["classify_provider_used"] = str(article.get("classify_provider_used", "local") or "local")
     article["summary_vi"] = sanitize_delivery_text(article.get("summary_vi", ""), max_len=260)
     article["editorial_angle"] = sanitize_delivery_text(article.get("editorial_angle", ""), max_len=180)
 
@@ -2411,6 +2518,7 @@ def _build_score_breakdown(article: dict[str, Any]) -> dict[str, Any]:
         "main_brief_reason_codes": list(article.get("main_brief_reason_codes", []) or []),
         "main_brief_skip_reason": route_reason,
         "component_score_source": str(article.get("component_score_source", "explicit") or "explicit"),
+        "classify_provider_used": str(article.get("classify_provider_used", "local") or "local"),
         "component_score_sum": int(article.get("base_total_score", 0) or 0),
         "c1_score": int(article.get("c1_score", 0) or 0),
         "c2_score": int(article.get("c2_score", 0) or 0),
@@ -2684,11 +2792,13 @@ def classify_and_score_node(state: dict[str, Any]) -> dict[str, Any]:
     max_classify = _cfg_int(state, "max_classify_articles", "MAX_CLASSIFY_ARTICLES", 25)
     classify_content_limit = _cfg_int(state, "classify_content_char_limit", "CLASSIFY_CONTENT_CHAR_LIMIT", 900)
     classify_max_tokens = _cfg_int(state, "classify_max_tokens", "CLASSIFY_MAX_TOKENS", 320)
+    runtime_config = dict(state.get("runtime_config", {}) or {})
+    grok_classify_is_enabled = grok_classify_enabled(runtime_config)
 
     llm_articles, held_out_articles = _prepare_classify_candidates(
         list(articles),
         max_classify,
-        runtime_config=state.get("runtime_config", {}),
+        runtime_config=runtime_config,
         feedback_summary_text=state.get("feedback_summary_text", ""),
         feedback_preferences=state.get("feedback_preference_profile", {}),
     )
@@ -2710,6 +2820,15 @@ def classify_and_score_node(state: dict[str, Any]) -> dict[str, Any]:
 
     scored = []
     total = len(llm_articles)
+    classify_grok_request_count = 0
+    classify_grok_success_count = 0
+    classify_grok_fallback_count = 0
+    classify_grok_items_processed = 0
+    classify_local_failure_count = 0
+    classify_grok_rescue_count = 0
+    classify_benchmark_request_count = 0
+    classify_benchmark_success_count = 0
+    classify_provider_counts = {"local": 0, "grok": 0, "local_then_grok": 0}
 
     for i, article in enumerate(llm_articles, 1):
         title = article.get("title", "N/A")
@@ -2742,12 +2861,26 @@ def classify_and_score_node(state: dict[str, Any]) -> dict[str, Any]:
                 temperature=0.1,
                 response_format=CLASSIFY_RESPONSE_FORMAT,
             )
-            result, json_status, raw_output = _resolve_classify_inference(
+            result, json_status, raw_output, provider_used, provider_details = _resolve_classify_inference_details(
                 user_prompt,
                 max_tokens=classify_max_tokens,
                 temperature=0.1,
                 initial_response=initial_inference,
+                runtime_config=runtime_config,
             )
+            provider_key = str(provider_used or "local")
+            if provider_key not in classify_provider_counts:
+                provider_key = "local"
+            classify_provider_counts[provider_key] += 1
+            article["classify_provider_used"] = provider_key
+            classify_grok_request_count += int(provider_details.get("grok_request_count", 0) or 0)
+            classify_grok_success_count += int(provider_details.get("grok_success_count", 0) or 0)
+            classify_grok_fallback_count += int(provider_details.get("grok_fallback_count", 0) or 0)
+            classify_grok_items_processed += int(provider_details.get("grok_items_processed", 0) or 0)
+            classify_local_failure_count += int(provider_details.get("classify_local_failure_count", 0) or 0)
+            classify_grok_rescue_count += int(provider_details.get("classify_grok_rescue_count", 0) or 0)
+            classify_benchmark_request_count += int(provider_details.get("classify_benchmark_request_count", 0) or 0)
+            classify_benchmark_success_count += int(provider_details.get("classify_benchmark_success_count", 0) or 0)
 
             if result and isinstance(result, dict):
                 _apply_structured_classify_result(
@@ -2768,6 +2901,10 @@ def classify_and_score_node(state: dict[str, Any]) -> dict[str, Any]:
                 _finalize_scored_article(article, min_score)
         except Exception as e:
             logger.error("❌ Classify failed: '%s': %s", title[:40], e)
+            article["classify_provider_used"] = str(article.get("classify_provider_used", "local") or "local")
+            classify_provider_counts[str(article.get("classify_provider_used", "local") or "local")] = (
+                classify_provider_counts.get(str(article.get("classify_provider_used", "local") or "local"), 0) + 1
+            )
             _llm_failure_fallback(article, min_score)
             _apply_source_history_adjustment(article, min_score)
             _finalize_scored_article(article, min_score)
@@ -2814,9 +2951,30 @@ def classify_and_score_node(state: dict[str, Any]) -> dict[str, Any]:
         },
     )
 
+    grok_metrics = merge_grok_observability(
+        state,
+        stage="classify",
+        enabled=grok_classify_is_enabled,
+        request_count=classify_grok_request_count,
+        success_count=classify_grok_success_count,
+        fallback_count=classify_grok_fallback_count,
+        items_processed=classify_grok_items_processed,
+        applied=classify_grok_rescue_count > 0,
+        extra={
+            "local_failure_count": classify_local_failure_count,
+            "grok_rescue_count": classify_grok_rescue_count,
+            "benchmark_request_count": classify_benchmark_request_count,
+            "benchmark_success_count": classify_benchmark_success_count,
+            "provider_local_count": classify_provider_counts.get("local", 0),
+            "provider_grok_count": classify_provider_counts.get("grok", 0),
+            "provider_local_then_grok_count": classify_provider_counts.get("local_then_grok", 0),
+        },
+    )
+
     return {
         "scored_articles": scored,
         "top_articles": top,
         "low_score_articles": low,
         "scored_snapshot_path": scored_snapshot_path,
+        **grok_metrics,
     }

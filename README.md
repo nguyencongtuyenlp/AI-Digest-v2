@@ -214,7 +214,22 @@ Hệ sẽ giữ gather + scoring local như cũ, nhưng ở bước `delivery_ju
 
 Để giới hạn chi phí, Grok chỉ được gọi cho shortlist cuối, không chạy trên toàn bộ batch.
 
+### Chạy thật với đủ 3 stage Grok
+
+Giả sử `XAI_API_KEY` đã có trong `config/.env`, có thể chạy publish với classify rescue + delivery rerank + final polish như sau:
+
+```bash
+DIGEST_RUN_PROFILE=publish \
+USE_GROK_FOR_CLASSIFY=1 \
+GROK_CLASSIFY_MODE=retry \
+USE_GROK_FOR_DELIVERY_RERANK=1 \
+USE_GROK_FOR_FINAL_POLISH=1 \
+.venv/bin/python main.py
+```
+
 ## Auto schedule
+
+Mặc định mẫu scheduler trong repo chạy lúc `07:30` mỗi ngày và pin MLX sang bản `14B` cho job tự động để giảm rủi ro OOM so với `32B`.
 
 ```bash
 cp scripts/launchd.plist ~/Library/LaunchAgents/com.quangdang.daily-digest-agent.plist

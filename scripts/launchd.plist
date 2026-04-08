@@ -18,9 +18,9 @@
     <key>StartCalendarInterval</key>
     <dict>
         <key>Hour</key>
-        <integer>8</integer>
+        <integer>7</integer>
         <key>Minute</key>
-        <integer>0</integer>
+        <integer>30</integer>
     </dict>
 
     <key>StandardOutPath</key>
@@ -35,6 +35,22 @@
         <string>/Users/quangdang/Projects/AI-digest-v2/.venv/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
         <key>HOME</key>
         <string>/Users/quangdang</string>
+        <key>DIGEST_RUN_PROFILE</key>
+        <string>publish</string>
+        <key>USE_GROK_FOR_CLASSIFY</key>
+        <string>1</string>
+        <key>GROK_CLASSIFY_MODE</key>
+        <string>retry</string>
+        <key>USE_GROK_FOR_DELIVERY_RERANK</key>
+        <string>1</string>
+        <key>USE_GROK_FOR_FINAL_POLISH</key>
+        <string>1</string>
+        <key>MLX_MODEL</key>
+        <string>mlx-community/Qwen2.5-14B-Instruct-4bit</string>
+        <key>MLX_FALLBACK_MODEL</key>
+        <string>mlx-community/Qwen2.5-14B-Instruct-4bit</string>
+        <key>MLX_AUTO_FALLBACK</key>
+        <string>1</string>
     </dict>
 
     <key>RunAtLoad</key>

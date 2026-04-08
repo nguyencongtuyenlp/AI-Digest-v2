@@ -73,6 +73,11 @@ class DigestState(TypedDict, total=False):
     artifact_cleanup: dict[str, Any]
     performance_report: dict[str, Any]
     stage_timings: Annotated[list[dict[str, Any]], operator.add]
+    grok_stage_usage: dict[str, Any]
+    grok_request_count: int
+    grok_success_count: int
+    grok_fallback_count: int
+    grok_items_processed: int
 
 
 # ── Node imports ─────────────────────────────────────────────────────

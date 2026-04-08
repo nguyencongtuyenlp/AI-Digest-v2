@@ -125,18 +125,24 @@ def apply_runtime_preset(profile: str, current: dict[str, Any]) -> dict[str, Any
                 "enable_hn": True,
                 "enable_reddit": True,
                 "enable_telegram_channels": True,
+                "use_grok_for_classify": False,
+                "grok_classify_mode": "retry",
+                "use_grok_for_delivery_rerank": True,
                 "enable_grok_delivery_judge": True,
                 "grok_delivery_max_articles": 14,
                 "enable_grok_prefilter": True,
                 "grok_prefilter_max_articles": 24,
                 "enable_grok_final_editor": True,
                 "grok_final_editor_max_articles": 10,
+                "use_grok_for_final_polish": True,
                 "enable_grok_news_copy": True,
                 "grok_news_copy_max_articles": 24,
                 "enable_grok_facebook_score": False,
                 "grok_facebook_max_articles": 10,
+                "use_grok_for_source_gap": True,
                 "enable_grok_source_gap": True,
                 "grok_source_gap_max_articles": 14,
+                "use_grok_for_scout": True,
                 "enable_grok_scout": True,
                 "grok_scout_max_queries": 3,
                 "grok_scout_max_articles": 8,
@@ -165,5 +171,20 @@ def apply_runtime_preset(profile: str, current: dict[str, Any]) -> dict[str, Any
         smart_model = os.getenv("MLX_SMART_MODEL", "").strip()
         if smart_model:
             merged["runtime_mlx_model"] = smart_model
+
+    if normalized_profile in {"grok_3_stage", "grok_full", "full_grok"}:
+        # Grok 3-stage:
+        # - bật đúng 3 stage Grok đã ghi trong README
+        # - không kéo thêm scout/prefilter/editor layers của preset smart
+        merged.update(
+            {
+                "use_grok_for_classify": True,
+                "grok_classify_mode": "retry",
+                "use_grok_for_delivery_rerank": True,
+                "enable_grok_delivery_judge": True,
+                "use_grok_for_final_polish": True,
+                "enable_grok_news_copy": True,
+            }
+        )
 
     return merged
