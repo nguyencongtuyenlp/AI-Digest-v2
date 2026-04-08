@@ -24,6 +24,7 @@ Output ghi vào state:
 
 from __future__ import annotations
 
+import asyncio
 import ast
 import json
 import logging
@@ -40,7 +41,7 @@ from digest.editorial.delivery_policy import (
     is_github_main_brief_significant,
     is_github_signal_article,
 )
-from digest.runtime.mlx_runner import resolve_pipeline_mlx_path, run_json_inference_meta
+from digest.runtime.mlx_runner import resolve_pipeline_mlx_path, run_json_inference_small_meta
 from digest.editorial.editorial_guardrails import sanitize_delivery_text
 from digest.sources.source_catalog import classify_source_kind
 from digest.runtime.temporal_snapshots import write_temporal_snapshot
@@ -905,7 +906,7 @@ def run_json_inference(
     Một số test cũ patch `digest.workflow.nodes.classify_and_score.run_json_inference`, nên giữ
     hook này ổn định dù runtime hiện tại dùng `run_json_inference_meta`.
     """
-    return run_json_inference_meta(
+    return run_json_inference_small_meta(
         system_prompt,
         user_prompt,
         max_tokens=max_tokens,
@@ -2841,89 +2842,109 @@ def classify_and_score_node(state: dict[str, Any]) -> dict[str, Any]:
     classify_benchmark_success_count = 0
     classify_provider_counts = {"local": 0, "grok": 0, "local_then_grok": 0}
 
-    for i, article in enumerate(llm_articles, 1):
-        title = article.get("title", "N/A")
-        logger.info("🏷️  Classify+Score [%d/%d]: %s", i, total, title[:60])
+    async def _classify_one(index: int, article: dict[str, Any], sem: asyncio.Semaphore) -> dict[str, Any]:
+        async with sem:
+            title = article.get("title", "N/A")
+            logger.info("🏷️  Classify+Score [%d/%d]: %s", index, total, title[:60])
 
-        related_ctx = _build_related_context(article)
-        user_prompt = CLASSIFY_SCORE_USER_TEMPLATE.format(
-            title=title,
-            url=article.get("url", ""),
-            source=article.get("source", "Unknown"),
-            source_domain=article.get("source_domain", ""),
-            published_at=article.get("published_at", article.get("published", "")),
-            published_at_source=article.get("published_at_source", "unknown"),
-            discovered_at=article.get("discovered_at", article.get("fetched_at", "")),
-            age_hours=article.get("age_hours", ""),
-            freshness_unknown=article.get("freshness_unknown", False),
-            is_stale_candidate=article.get("is_stale_candidate", False),
-            source_verified=article.get("source_verified", False),
-            content_available=article.get("content_available", False),
-            content=(article.get("content", "") or article.get("snippet", ""))[:classify_content_limit],
-            related_context=related_ctx,
-            feedback_context=state.get("feedback_summary_text", "Chưa có feedback mới từ team."),
-        )
-
-        try:
-            light_mlx = resolve_pipeline_mlx_path("light", runtime_config)
-            initial_inference = run_json_inference(
-                CLASSIFY_SCORE_SYSTEM,
-                user_prompt,
-                max_tokens=classify_max_tokens,
-                temperature=0.1,
-                response_format=CLASSIFY_RESPONSE_FORMAT,
-                model_path=light_mlx,
+            related_ctx = _build_related_context(article)
+            user_prompt = CLASSIFY_SCORE_USER_TEMPLATE.format(
+                title=title,
+                url=article.get("url", ""),
+                source=article.get("source", "Unknown"),
+                source_domain=article.get("source_domain", ""),
+                published_at=article.get("published_at", article.get("published", "")),
+                published_at_source=article.get("published_at_source", "unknown"),
+                discovered_at=article.get("discovered_at", article.get("fetched_at", "")),
+                age_hours=article.get("age_hours", ""),
+                freshness_unknown=article.get("freshness_unknown", False),
+                is_stale_candidate=article.get("is_stale_candidate", False),
+                source_verified=article.get("source_verified", False),
+                content_available=article.get("content_available", False),
+                content=(article.get("content", "") or article.get("snippet", ""))[:classify_content_limit],
+                related_context=related_ctx,
+                feedback_context=state.get("feedback_summary_text", "Chưa có feedback mới từ team."),
             )
-            result, json_status, raw_output, provider_used, provider_details = _resolve_classify_inference_details(
-                user_prompt,
-                max_tokens=classify_max_tokens,
-                temperature=0.1,
-                initial_response=initial_inference,
-                runtime_config=runtime_config,
-                local_model_path=light_mlx,
-            )
-            provider_key = str(provider_used or "local")
-            if provider_key not in classify_provider_counts:
-                provider_key = "local"
-            classify_provider_counts[provider_key] += 1
-            article["classify_provider_used"] = provider_key
-            classify_grok_request_count += int(provider_details.get("grok_request_count", 0) or 0)
-            classify_grok_success_count += int(provider_details.get("grok_success_count", 0) or 0)
-            classify_grok_fallback_count += int(provider_details.get("grok_fallback_count", 0) or 0)
-            classify_grok_items_processed += int(provider_details.get("grok_items_processed", 0) or 0)
-            classify_local_failure_count += int(provider_details.get("classify_local_failure_count", 0) or 0)
-            classify_grok_rescue_count += int(provider_details.get("classify_grok_rescue_count", 0) or 0)
-            classify_benchmark_request_count += int(provider_details.get("classify_benchmark_request_count", 0) or 0)
-            classify_benchmark_success_count += int(provider_details.get("classify_benchmark_success_count", 0) or 0)
 
-            if result and isinstance(result, dict):
-                _apply_structured_classify_result(
-                    article,
-                    result,
-                    min_score,
-                    json_status=json_status or CLASSIFY_JSON_STATUS_VALID,
+            try:
+                light_mlx = resolve_pipeline_mlx_path("light", runtime_config)
+                initial_inference = await asyncio.to_thread(
+                    run_json_inference,
+                    CLASSIFY_SCORE_SYSTEM,
+                    user_prompt,
+                    max_tokens=classify_max_tokens,
+                    temperature=0.1,
+                    response_format=CLASSIFY_RESPONSE_FORMAT,
+                    model_path=light_mlx,
                 )
-                _initialize_score_tracking(article, component_source="model")
-                _apply_strategic_boost(article, min_score)
-                _apply_freshness_penalty(article, min_score)
-                _apply_source_history_adjustment(article, min_score)
-                _finalize_scored_article(article, min_score)
-            else:
-                logger.warning("⚠️ Model không trả JSON ổn định cho '%s'; dùng prose rescue/fallback.", title[:40])
-                _classify_prose_rescue(article, raw_output, min_score)
-                _apply_source_history_adjustment(article, min_score)
-                _finalize_scored_article(article, min_score)
-        except Exception as e:
-            logger.error("❌ Classify failed: '%s': %s", title[:40], e)
-            article["classify_provider_used"] = str(article.get("classify_provider_used", "local") or "local")
-            classify_provider_counts[str(article.get("classify_provider_used", "local") or "local")] = (
-                classify_provider_counts.get(str(article.get("classify_provider_used", "local") or "local"), 0) + 1
-            )
-            _llm_failure_fallback(article, min_score)
-            _apply_source_history_adjustment(article, min_score)
-            _finalize_scored_article(article, min_score)
+                result, json_status, raw_output, provider_used, provider_details = _resolve_classify_inference_details(
+                    user_prompt,
+                    max_tokens=classify_max_tokens,
+                    temperature=0.1,
+                    initial_response=initial_inference,
+                    runtime_config=runtime_config,
+                    local_model_path=light_mlx,
+                )
+                provider_key = str(provider_used or "local")
+                if provider_key not in classify_provider_counts:
+                    provider_key = "local"
+                classify_provider_counts[provider_key] += 1
+                article["classify_provider_used"] = provider_key
+                nonlocal classify_grok_request_count
+                nonlocal classify_grok_success_count
+                nonlocal classify_grok_fallback_count
+                nonlocal classify_grok_items_processed
+                nonlocal classify_local_failure_count
+                nonlocal classify_grok_rescue_count
+                nonlocal classify_benchmark_request_count
+                nonlocal classify_benchmark_success_count
+                classify_grok_request_count += int(provider_details.get("grok_request_count", 0) or 0)
+                classify_grok_success_count += int(provider_details.get("grok_success_count", 0) or 0)
+                classify_grok_fallback_count += int(provider_details.get("grok_fallback_count", 0) or 0)
+                classify_grok_items_processed += int(provider_details.get("grok_items_processed", 0) or 0)
+                classify_local_failure_count += int(provider_details.get("classify_local_failure_count", 0) or 0)
+                classify_grok_rescue_count += int(provider_details.get("classify_grok_rescue_count", 0) or 0)
+                classify_benchmark_request_count += int(provider_details.get("classify_benchmark_request_count", 0) or 0)
+                classify_benchmark_success_count += int(provider_details.get("classify_benchmark_success_count", 0) or 0)
 
-        scored.append(article)
+                if result and isinstance(result, dict):
+                    _apply_structured_classify_result(
+                        article,
+                        result,
+                        min_score,
+                        json_status=json_status or CLASSIFY_JSON_STATUS_VALID,
+                    )
+                    _initialize_score_tracking(article, component_source="model")
+                    _apply_strategic_boost(article, min_score)
+                    _apply_freshness_penalty(article, min_score)
+                    _apply_source_history_adjustment(article, min_score)
+                    _finalize_scored_article(article, min_score)
+                else:
+                    logger.warning("⚠️ Model không trả JSON ổn định cho '%s'; dùng prose rescue/fallback.", title[:40])
+                    _classify_prose_rescue(article, raw_output, min_score)
+                    _apply_source_history_adjustment(article, min_score)
+                    _finalize_scored_article(article, min_score)
+            except Exception as e:
+                logger.error("❌ Classify failed: '%s': %s", title[:40], e)
+                article["classify_provider_used"] = str(article.get("classify_provider_used", "local") or "local")
+                classify_provider_counts[str(article.get("classify_provider_used", "local") or "local")] = (
+                    classify_provider_counts.get(str(article.get("classify_provider_used", "local") or "local"), 0) + 1
+                )
+                _llm_failure_fallback(article, min_score)
+                _apply_source_history_adjustment(article, min_score)
+                _finalize_scored_article(article, min_score)
+            return article
+
+    async def _run_classify_batch() -> list[dict[str, Any]]:
+        sem = asyncio.Semaphore(3)
+        tasks = [
+            _classify_one(index, article, sem)
+            for index, article in enumerate(llm_articles, 1)
+        ]
+        return await asyncio.gather(*tasks)
+
+    if llm_articles:
+        scored.extend(asyncio.run(_run_classify_batch()))
 
     for article in held_out_articles:
         _held_out_article_fallback(article)

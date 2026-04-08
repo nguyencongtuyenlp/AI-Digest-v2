@@ -10,6 +10,7 @@ When runtime_config["runtime_mlx_model"] is set (e.g. fast preset), both tiers u
 
 from __future__ import annotations
 
+import asyncio
 import ast
 import gc
 import inspect
@@ -17,20 +18,29 @@ import json
 import logging
 import os
 import re
-import threading
 from typing import Any
 
 from jsonschema import ValidationError, validate
 
 logger = logging.getLogger(__name__)
 
-_mlx_cache: dict[str, tuple[Any, Any]] = {}
 _sampler_param = None
 _runtime_fallback_model_path = None
 _runtime_mlx_model_path: str | None = None
+_model_large: tuple[Any, Any] | None = None
+_model_large_path: str | None = None
+_model_small: tuple[Any, Any] | None = None
+_model_small_path: str | None = None
 
-# LangGraph có thể chạy batch_deep và batch_quick song song — hai luồng cùng gọi Metal dễ gây assert MTLCommandBuffer.
-_mlx_inference_lock = threading.Lock()
+# Async gate dùng cho các node chạy coroutine/to_thread để tránh small + large inference đè nhau trên Metal.
+_mlx_inference_semaphore: asyncio.Semaphore | None = None
+
+
+def _inference_semaphore() -> asyncio.Semaphore:
+    global _mlx_inference_semaphore
+    if _mlx_inference_semaphore is None:
+        _mlx_inference_semaphore = asyncio.Semaphore(1)
+    return _mlx_inference_semaphore
 
 
 def _mlx_inference_serialize_enabled() -> bool:
@@ -167,8 +177,24 @@ def _coerce_parsed_for_json_schema(parsed: Any, response_format: dict[str, Any] 
     return parsed
 
 
+def _default_large_model_path() -> str:
+    return (
+        os.getenv("MLX_LARGE_MODEL", "").strip()
+        or os.getenv("MLX_MODEL", "").strip()
+        or "mlx-community/Qwen2.5-32B-Instruct-4bit"
+    )
+
+
+def _default_small_model_path() -> str:
+    return (
+        os.getenv("MLX_SMALL_MODEL", "").strip()
+        or os.getenv("MLX_LIGHT_MODEL", "").strip()
+        or _default_large_model_path()
+    )
+
+
 def _default_model_path() -> str:
-    return os.getenv("MLX_MODEL", "mlx-community/Qwen2.5-32B-Instruct-4bit")
+    return _default_large_model_path()
 
 
 def _fallback_model_path() -> str:
@@ -186,11 +212,10 @@ def resolve_pipeline_mlx_path(tier: str, runtime_config: dict[str, Any] | None =
     forced = str(rc.get("runtime_mlx_model", "") or "").strip()
     if forced:
         return forced
-    if str(tier or "").strip().lower() == "light":
-        light = os.getenv("MLX_LIGHT_MODEL", "").strip()
-        if light:
-            return light
-    return _default_model_path()
+    normalized_tier = str(tier or "").strip().lower()
+    if normalized_tier in {"light", "small"}:
+        return _default_small_model_path()
+    return _default_large_model_path()
 
 
 def _is_oom_error(exc: Exception) -> bool:
@@ -207,15 +232,21 @@ def _is_oom_error(exc: Exception) -> bool:
     )
 
 
-def _effective_model_path(requested_model_path: str | None = None) -> str:
+def _effective_model_path(
+    requested_model_path: str | None = None,
+    *,
+    tier: str = "large",
+) -> str:
     # Explicit path from caller wins (dual-tier); then global run override; then OOM fallback; then default.
     if requested_model_path and str(requested_model_path).strip():
         return str(requested_model_path).strip()
     if _runtime_mlx_model_path:
         return _runtime_mlx_model_path
-    if _runtime_fallback_model_path:
+    if str(tier or "").strip().lower() in {"heavy", "large"} and _runtime_fallback_model_path:
         return _runtime_fallback_model_path
-    return _default_model_path()
+    if str(tier or "").strip().lower() in {"light", "small"}:
+        return _default_small_model_path()
+    return _default_large_model_path()
 
 
 def set_runtime_mlx_model_path(model_path: str | None) -> None:
@@ -229,8 +260,15 @@ def clear_runtime_mlx_model_path() -> None:
 
 
 def _release_mlx_cache_all() -> None:
-    global _mlx_cache
-    _mlx_cache.clear()
+    global _model_large, _model_large_path, _model_small, _model_small_path
+    _model_large = None
+    _model_large_path = None
+    _model_small = None
+    _model_small_path = None
+    _clear_mlx_runtime_caches()
+
+
+def _clear_mlx_runtime_caches() -> None:
     gc.collect()
     try:
         import mlx.core as mx
@@ -247,8 +285,17 @@ def _release_mlx_cache_all() -> None:
 
 
 def _evict_mlx_path(resolved_path: str) -> None:
-    if resolved_path in _mlx_cache:
-        del _mlx_cache[resolved_path]
+    global _model_large, _model_large_path, _model_small, _model_small_path
+    evicted = False
+    if _model_large_path == resolved_path:
+        _model_large = None
+        _model_large_path = None
+        evicted = True
+    if _model_small_path == resolved_path:
+        _model_small = None
+        _model_small_path = None
+        evicted = True
+    if evicted:
         logger.info("Evicted MLX model from cache: %s", resolved_path)
     gc.collect()
     try:
@@ -271,14 +318,54 @@ def _release_model() -> None:
 
 
 def get_model(model_path: str | None = None):
-    resolved_model_path = _effective_model_path(model_path)
-    if resolved_model_path not in _mlx_cache:
+    return get_large_model(model_path=model_path)
+
+
+def _get_tier_model(slot: str, model_path: str | None = None):
+    global _model_large, _model_large_path, _model_small, _model_small_path
+
+    normalized_slot = "small" if str(slot or "").strip().lower() in {"light", "small"} else "large"
+    resolved_model_path = _effective_model_path(model_path, tier=normalized_slot)
+
+    current_model = _model_small if normalized_slot == "small" else _model_large
+    current_path = _model_small_path if normalized_slot == "small" else _model_large_path
+    if current_model is None or current_path != resolved_model_path:
         from mlx_lm import load
 
-        logger.info("Loading MLX model: %s", resolved_model_path)
-        _mlx_cache[resolved_model_path] = load(resolved_model_path)
-        logger.info("MLX model loaded successfully: %s", resolved_model_path)
-    return _mlx_cache[resolved_model_path]
+        logger.info("Loading MLX %s model: %s", normalized_slot, resolved_model_path)
+        loaded = load(resolved_model_path)
+        if normalized_slot == "small":
+            _model_small = loaded
+            _model_small_path = resolved_model_path
+            current_model = _model_small
+        else:
+            _model_large = loaded
+            _model_large_path = resolved_model_path
+            current_model = _model_large
+        logger.info("MLX %s model loaded successfully: %s", normalized_slot, resolved_model_path)
+    return current_model
+
+
+def get_large_model(model_path: str | None = None):
+    return _get_tier_model("large", model_path=model_path)
+
+
+def get_small_model(model_path: str | None = None):
+    return _get_tier_model("small", model_path=model_path)
+
+
+def release_large_model() -> None:
+    global _model_large, _model_large_path
+    _model_large = None
+    _model_large_path = None
+    _clear_mlx_runtime_caches()
+
+
+def release_small_model() -> None:
+    global _model_small, _model_small_path
+    _model_small = None
+    _model_small_path = None
+    _clear_mlx_runtime_caches()
 
 
 def _make_sampler_compatible(temperature: float):
@@ -331,34 +418,31 @@ def _generate_with_model(
     temperature: float,
     model_path: str | None = None,
     response_format: dict[str, Any] | None = None,
+    *,
+    tier: str = "large",
 ) -> str:
     from mlx_lm import generate
 
-    def _run() -> str:
-        model, tokenizer = get_model(model_path=model_path)
-        messages = [
-            {
-                "role": "system",
-                "content": f"{system_prompt.rstrip()}{_schema_instruction(response_format)}",
-            },
-            {"role": "user", "content": user_prompt},
-        ]
+    model_getter = get_small_model if str(tier or "").strip().lower() in {"light", "small"} else get_large_model
+    model, tokenizer = model_getter(model_path=model_path)
+    messages = [
+        {
+            "role": "system",
+            "content": f"{system_prompt.rstrip()}{_schema_instruction(response_format)}",
+        },
+        {"role": "user", "content": user_prompt},
+    ]
 
-        prompt_text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-        sampler = _make_sampler_compatible(temperature)
-        return generate(
-            model,
-            tokenizer,
-            prompt=prompt_text,
-            max_tokens=max_tokens,
-            verbose=False,
-            sampler=sampler,
-        )
-
-    if _mlx_inference_serialize_enabled():
-        with _mlx_inference_lock:
-            return _run()
-    return _run()
+    prompt_text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+    sampler = _make_sampler_compatible(temperature)
+    return generate(
+        model,
+        tokenizer,
+        prompt=prompt_text,
+        max_tokens=max_tokens,
+        verbose=False,
+        sampler=sampler,
+    )
 
 
 def run_inference(
@@ -369,9 +453,30 @@ def run_inference(
     model_path: str | None = None,
     response_format: dict[str, Any] | None = None,
 ) -> str:
+    return run_inference_large(
+        system_prompt,
+        user_prompt,
+        max_tokens=max_tokens,
+        temperature=temperature,
+        model_path=model_path,
+        response_format=response_format,
+    )
+
+
+def _run_inference_for_tier(
+    tier: str,
+    system_prompt: str,
+    user_prompt: str,
+    *,
+    max_tokens: int,
+    temperature: float,
+    model_path: str | None,
+    response_format: dict[str, Any] | None,
+) -> str:
     global _runtime_fallback_model_path
 
-    requested_model_path = _effective_model_path(model_path)
+    normalized_tier = "small" if str(tier or "").strip().lower() in {"light", "small"} else "large"
+    requested_model_path = _effective_model_path(model_path, tier=normalized_tier)
     try:
         return _generate_with_model(
             system_prompt,
@@ -380,11 +485,17 @@ def run_inference(
             temperature=temperature,
             model_path=requested_model_path,
             response_format=response_format,
+            tier=normalized_tier,
         )
     except Exception as exc:
         auto_fallback = os.getenv("MLX_AUTO_FALLBACK", "1").strip().lower() not in {"0", "false", "no"}
         fallback_model = _fallback_model_path()
-        if auto_fallback and _is_oom_error(exc) and requested_model_path != fallback_model:
+        if (
+            normalized_tier == "large"
+            and auto_fallback
+            and _is_oom_error(exc)
+            and requested_model_path != fallback_model
+        ):
             logger.warning(
                 "MLX OOM on %s; retrying with fallback model %s for the rest of this run.",
                 requested_model_path,
@@ -399,8 +510,107 @@ def run_inference(
                 temperature=temperature,
                 model_path=fallback_model,
                 response_format=response_format,
+                tier="large",
             )
         raise
+
+
+def run_inference_large(
+    system_prompt: str,
+    user_prompt: str,
+    max_tokens: int = 1000,
+    temperature: float = 0.7,
+    model_path: str | None = None,
+    response_format: dict[str, Any] | None = None,
+) -> str:
+    return _run_inference_for_tier(
+        "large",
+        system_prompt,
+        user_prompt,
+        max_tokens=max_tokens,
+        temperature=temperature,
+        model_path=model_path,
+        response_format=response_format,
+    )
+
+
+def run_inference_small(
+    system_prompt: str,
+    user_prompt: str,
+    max_tokens: int = 1000,
+    temperature: float = 0.7,
+    model_path: str | None = None,
+    response_format: dict[str, Any] | None = None,
+) -> str:
+    return _run_inference_for_tier(
+        "small",
+        system_prompt,
+        user_prompt,
+        max_tokens=max_tokens,
+        temperature=temperature,
+        model_path=model_path,
+        response_format=response_format,
+    )
+
+
+async def run_inference_large_async(
+    system_prompt: str,
+    user_prompt: str,
+    max_tokens: int = 1000,
+    temperature: float = 0.7,
+    model_path: str | None = None,
+    response_format: dict[str, Any] | None = None,
+) -> str:
+    if not _mlx_inference_serialize_enabled():
+        return await asyncio.to_thread(
+            run_inference_large,
+            system_prompt,
+            user_prompt,
+            max_tokens,
+            temperature,
+            model_path,
+            response_format,
+        )
+    async with _inference_semaphore():
+        return await asyncio.to_thread(
+            run_inference_large,
+            system_prompt,
+            user_prompt,
+            max_tokens,
+            temperature,
+            model_path,
+            response_format,
+        )
+
+
+async def run_inference_small_async(
+    system_prompt: str,
+    user_prompt: str,
+    max_tokens: int = 1000,
+    temperature: float = 0.7,
+    model_path: str | None = None,
+    response_format: dict[str, Any] | None = None,
+) -> str:
+    if not _mlx_inference_serialize_enabled():
+        return await asyncio.to_thread(
+            run_inference_small,
+            system_prompt,
+            user_prompt,
+            max_tokens,
+            temperature,
+            model_path,
+            response_format,
+        )
+    async with _inference_semaphore():
+        return await asyncio.to_thread(
+            run_inference_small,
+            system_prompt,
+            user_prompt,
+            max_tokens,
+            temperature,
+            model_path,
+            response_format,
+        )
 
 
 def _normalize_json_candidate(text: str) -> str:
@@ -541,6 +751,44 @@ def run_json_inference(
     return parsed
 
 
+def run_json_inference_large(
+    system_prompt: str,
+    user_prompt: str,
+    max_tokens: int = 1500,
+    temperature: float = 0.1,
+    model_path: str | None = None,
+    response_format: dict[str, Any] | None = None,
+) -> dict | list | None:
+    parsed, _, _ = run_json_inference_large_meta(
+        system_prompt,
+        user_prompt,
+        max_tokens=max_tokens,
+        temperature=temperature,
+        model_path=model_path,
+        response_format=response_format,
+    )
+    return parsed
+
+
+def run_json_inference_small(
+    system_prompt: str,
+    user_prompt: str,
+    max_tokens: int = 1500,
+    temperature: float = 0.1,
+    model_path: str | None = None,
+    response_format: dict[str, Any] | None = None,
+) -> dict | list | None:
+    parsed, _, _ = run_json_inference_small_meta(
+        system_prompt,
+        user_prompt,
+        max_tokens=max_tokens,
+        temperature=temperature,
+        model_path=model_path,
+        response_format=response_format,
+    )
+    return parsed
+
+
 def run_json_inference_meta(
     system_prompt: str,
     user_prompt: str,
@@ -550,6 +798,47 @@ def run_json_inference_meta(
     response_format: dict[str, Any] | None = None,
 ) -> tuple[dict | list | None, str, bool]:
     raw = run_inference(
+        system_prompt,
+        user_prompt,
+        max_tokens=max_tokens,
+        temperature=temperature,
+        model_path=model_path,
+        response_format=response_format,
+    )
+
+    candidate = _extract_json_payload(raw)
+    parsed = _parse_json_candidate(candidate)
+    if parsed is not None:
+        coerced = _coerce_parsed_for_json_schema(parsed, response_format)
+        validated = _validate_response_format(coerced, response_format)
+        if validated is not None:
+            return validated, raw, True
+        if coerced is parsed and candidate != raw.strip():
+            parsed_full = _parse_json_candidate(raw.strip())
+            if isinstance(parsed_full, (dict, list)) and parsed_full != parsed:
+                coerced2 = _coerce_parsed_for_json_schema(parsed_full, response_format)
+                validated2 = _validate_response_format(coerced2, response_format)
+                if validated2 is not None:
+                    return validated2, raw, True
+
+    looks_structured = _looks_structured_output(raw)
+    logger.warning("Could not parse JSON from model output (%d chars)", len(raw))
+    logger.debug("Raw output: %s", raw[:500])
+    return None, raw, looks_structured
+
+
+def _run_json_inference_meta_for_tier(
+    tier: str,
+    system_prompt: str,
+    user_prompt: str,
+    *,
+    max_tokens: int,
+    temperature: float,
+    model_path: str | None,
+    response_format: dict[str, Any] | None,
+) -> tuple[dict | list | None, str, bool]:
+    runner = run_inference_small if str(tier or "").strip().lower() in {"light", "small"} else run_inference_large
+    raw = runner(
         system_prompt,
         user_prompt,
         max_tokens=max_tokens,
@@ -578,3 +867,139 @@ def run_json_inference_meta(
     logger.warning("Could not parse JSON from model output (%d chars)", len(raw))
     logger.debug("Raw output: %s", raw[:500])
     return None, raw, looks_structured
+
+
+def run_json_inference_large_meta(
+    system_prompt: str,
+    user_prompt: str,
+    max_tokens: int = 1500,
+    temperature: float = 0.1,
+    model_path: str | None = None,
+    response_format: dict[str, Any] | None = None,
+) -> tuple[dict | list | None, str, bool]:
+    return _run_json_inference_meta_for_tier(
+        "large",
+        system_prompt,
+        user_prompt,
+        max_tokens=max_tokens,
+        temperature=temperature,
+        model_path=model_path,
+        response_format=response_format,
+    )
+
+
+def run_json_inference_small_meta(
+    system_prompt: str,
+    user_prompt: str,
+    max_tokens: int = 1500,
+    temperature: float = 0.1,
+    model_path: str | None = None,
+    response_format: dict[str, Any] | None = None,
+) -> tuple[dict | list | None, str, bool]:
+    return _run_json_inference_meta_for_tier(
+        "small",
+        system_prompt,
+        user_prompt,
+        max_tokens=max_tokens,
+        temperature=temperature,
+        model_path=model_path,
+        response_format=response_format,
+    )
+
+
+async def run_json_inference_large_async(
+    system_prompt: str,
+    user_prompt: str,
+    max_tokens: int = 1500,
+    temperature: float = 0.1,
+    model_path: str | None = None,
+    response_format: dict[str, Any] | None = None,
+) -> dict | list | None:
+    parsed, _, _ = await run_json_inference_large_meta_async(
+        system_prompt,
+        user_prompt,
+        max_tokens=max_tokens,
+        temperature=temperature,
+        model_path=model_path,
+        response_format=response_format,
+    )
+    return parsed
+
+
+async def run_json_inference_small_async(
+    system_prompt: str,
+    user_prompt: str,
+    max_tokens: int = 1500,
+    temperature: float = 0.1,
+    model_path: str | None = None,
+    response_format: dict[str, Any] | None = None,
+) -> dict | list | None:
+    parsed, _, _ = await run_json_inference_small_meta_async(
+        system_prompt,
+        user_prompt,
+        max_tokens=max_tokens,
+        temperature=temperature,
+        model_path=model_path,
+        response_format=response_format,
+    )
+    return parsed
+
+
+async def run_json_inference_large_meta_async(
+    system_prompt: str,
+    user_prompt: str,
+    max_tokens: int = 1500,
+    temperature: float = 0.1,
+    model_path: str | None = None,
+    response_format: dict[str, Any] | None = None,
+) -> tuple[dict | list | None, str, bool]:
+    if not _mlx_inference_serialize_enabled():
+        return await asyncio.to_thread(
+            run_json_inference_large_meta,
+            system_prompt,
+            user_prompt,
+            max_tokens,
+            temperature,
+            model_path,
+            response_format,
+        )
+    async with _inference_semaphore():
+        return await asyncio.to_thread(
+            run_json_inference_large_meta,
+            system_prompt,
+            user_prompt,
+            max_tokens,
+            temperature,
+            model_path,
+            response_format,
+        )
+
+
+async def run_json_inference_small_meta_async(
+    system_prompt: str,
+    user_prompt: str,
+    max_tokens: int = 1500,
+    temperature: float = 0.1,
+    model_path: str | None = None,
+    response_format: dict[str, Any] | None = None,
+) -> tuple[dict | list | None, str, bool]:
+    if not _mlx_inference_serialize_enabled():
+        return await asyncio.to_thread(
+            run_json_inference_small_meta,
+            system_prompt,
+            user_prompt,
+            max_tokens,
+            temperature,
+            model_path,
+            response_format,
+        )
+    async with _inference_semaphore():
+        return await asyncio.to_thread(
+            run_json_inference_small_meta,
+            system_prompt,
+            user_prompt,
+            max_tokens,
+            temperature,
+            model_path,
+            response_format,
+        )

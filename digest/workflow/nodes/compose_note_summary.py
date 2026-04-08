@@ -12,18 +12,20 @@ import logging
 from typing import Any
 
 from digest.editorial.editorial_guardrails import build_article_grounding, sanitize_delivery_text
-from digest.runtime.mlx_runner import resolve_pipeline_mlx_path, run_inference
+from digest.runtime.mlx_runner import resolve_pipeline_mlx_path, run_inference_large
 
 logger = logging.getLogger(__name__)
 
-NOTE_SUMMARY_SYSTEM = """Bạn là biên tập viên cho một sản phẩm AI Daily Digest.
-Nhiệm vụ: nén một bài phân tích thành đúng 1 đoạn bản tin ngắn, chuyên nghiệp, dùng cho Telegram và Notion.
+NOTE_SUMMARY_SYSTEM = """Bạn là biên tập viên tin nhanh cho một sản phẩm AI Daily Digest.
+Nhiệm vụ: nén một bài phân tích thành đúng 1 đoạn bản tin ngắn, chuyên nghiệp, đọc như wire copy dùng cho Telegram và Notion.
 
 Yêu cầu bắt buộc:
 - Viết bằng tiếng Việt.
 - Chỉ 1 đoạn, không bullet, không markdown.
 - Độ dài mục tiêu: 45-85 từ.
+- Mở bằng dữ kiện hoặc diễn biến quan trọng nhất, rồi nối sang bối cảnh ngắn nếu cần.
 - Chỉ tóm tin: ai làm gì, nội dung/số liệu chính, bối cảnh đã nêu trong nguồn (nếu có).
+- Văn phong phải gọn, liền mạch, tự nhiên như bản tin công nghệ chuyên nghiệp; không viết kiểu gạch đầu dòng trá hình hay liệt kê mệnh đề rời.
 - Không đưa ý nghĩa cho “doanh nghiệp/độc giả phải làm gì”, không cảnh báo hay khuyên hành động; đó không phải vai trò của brief tin.
 - Chỉ được dùng thông tin có trong fact anchors, metadata nguồn, tóm tắt sẵn có và bài phân tích.
 - Không được biến inference thành fact.
@@ -133,12 +135,12 @@ def compose_note_summary_node(state: dict[str, Any]) -> dict[str, Any]:
         )
 
         try:
-            note = run_inference(
+            note = run_inference_large(
                 NOTE_SUMMARY_SYSTEM,
                 user_prompt,
                 max_tokens=220,
                 temperature=0.3,
-                model_path=resolve_pipeline_mlx_path("light", runtime_config),
+                model_path=resolve_pipeline_mlx_path("heavy", runtime_config),
             ).strip()
             article["note_summary_vi"] = sanitize_delivery_text(note) or _fallback_note(article)
         except Exception as e:

@@ -266,6 +266,7 @@ def _status_payload() -> dict[str, Any]:
         }
 
     payload["elapsed_seconds"] = round(max(0.0, time.time() - started_at), 1) if running and started_at else 0.0
+    payload["elapsed_minutes"] = round(float(payload["elapsed_seconds"]) / 60.0, 2) if payload["elapsed_seconds"] else 0.0
     payload["report_content"] = _read_report_content(str(result.get("run_report_path", "") or ""))
     return payload
 
@@ -1258,7 +1259,7 @@ HTML_PAGE = """<!doctype html>
 
         <div class="hero-side">
           <div class="side-title">Run timer</div>
-          <div id="elapsed" class="side-number">0.0s</div>
+          <div id="elapsed" class="side-number">0.0m</div>
           <p class="side-copy">
             Baseline preview dùng cùng backbone production và chưa tạo side effect ra ngoài.
             Nếu muốn thử batch “gắt” hơn, dùng Grok Smart rồi so trực tiếp output main brief ở bên dưới.
@@ -1666,7 +1667,8 @@ HTML_PAGE = """<!doctype html>
 
       document.getElementById('status-text').textContent = data.running ? 'Running' : 'Idle';
       document.getElementById('status-dot').className = data.running ? 'dot running' : 'dot';
-      document.getElementById('elapsed').textContent = `${data.elapsed_seconds || result.elapsed_seconds || 0}s`;
+      const elapsedMinutes = data.elapsed_minutes || ((data.elapsed_seconds || result.elapsed_seconds || 0) / 60);
+      document.getElementById('elapsed').textContent = `${Number(elapsedMinutes || 0).toFixed(1)}m`;
       document.getElementById('raw-count').textContent = result.raw_count || 0;
       document.getElementById('scored-count').textContent = result.scored_count || 0;
       document.getElementById('tg-candidate-count').textContent = result.telegram_candidate_count || 0;

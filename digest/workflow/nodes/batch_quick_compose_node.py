@@ -10,7 +10,11 @@ from typing import Any
 
 
 from digest.editorial.editorial_guardrails import build_article_grounding, sanitize_delivery_text
-from digest.runtime.mlx_runner import resolve_pipeline_mlx_path, run_json_inference_meta
+from digest.runtime.mlx_runner import (
+    resolve_pipeline_mlx_path,
+    run_json_inference_large_meta,
+    run_json_inference_small_meta,
+)
 from digest.workflow.nodes.classify_and_score import _cfg_int
 from digest.workflow.nodes.compose_note_summary import NOTE_SUMMARY_SYSTEM, NOTE_SUMMARY_USER_TEMPLATE, _analysis_excerpt, _fallback_note
 
@@ -54,10 +58,11 @@ def _batch_system_prompt(*, compact_for_light_model: bool = False) -> str:
         "Bạn sẽ nén nhiều bài viết trong một lần gọi.\n"
         "Trả về đúng 1 JSON object có key `articles`.\n"
         "Mỗi item phải có `item_id` và `note_summary_vi`.\n"
+        "note_summary_vi chỉ nên 1 đoạn 35-70 từ, 1-2 câu, mở bằng diễn biến chính, không bullet, không khuyến nghị hành động.\n"
         "Không bỏ sót item. Không thêm prose ngoài JSON."
     )
     if compact_for_light_model:
-        base += "\n\n# FAST MODEL: note_summary_vi 2-4 câu ngắn, bám fact trong payload.\n"
+        base += "\n\n# FAST MODEL: note_summary_vi phải cực gọn, bám fact, ưu tiên 1-2 câu ngắn.\n"
     return base
 
 
@@ -149,13 +154,13 @@ def batch_quick_compose_node(state: dict[str, Any]) -> dict[str, Any]:
         )
         user_blob = _build_batch_user_prompt(sub_batch)
         fmt = _batch_response_format(len(sub_batch))
-        max_tok = max(220 * len(sub_batch), 480)
+        max_tok = max(140 * len(sub_batch), 360)
 
-        parsed, raw_output, _looks_structured = run_json_inference_meta(
+        parsed, raw_output, _looks_structured = run_json_inference_small_meta(
             _batch_system_prompt(compact_for_light_model=use_light),
             user_blob,
             max_tokens=max_tok,
-            temperature=0.3,
+            temperature=0.2,
             model_path=light_mlx if use_light else heavy_mlx,
             response_format=fmt,
         )
@@ -169,11 +174,11 @@ def batch_quick_compose_node(state: dict[str, Any]) -> dict[str, Any]:
                 sum(1 for sid in sub_ids if sid in result_map),
                 len(sub_batch),
             )
-            parsed_h, raw_h, _ = run_json_inference_meta(
+            parsed_h, raw_h, _ = run_json_inference_large_meta(
                 _batch_system_prompt(compact_for_light_model=False),
                 user_blob,
                 max_tokens=max_tok,
-                temperature=0.3,
+                temperature=0.2,
                 model_path=heavy_mlx,
                 response_format=fmt,
             )

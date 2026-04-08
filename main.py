@@ -47,7 +47,7 @@ def _harden_http_logging() -> None:
 _harden_http_logging()
 
 
-def main() -> None:
+def _run_pipeline_cli() -> None:
     """Chạy toàn bộ pipeline Daily Digest Agent."""
     # Đọc profile để cùng một codebase có thể chạy publish/preview preset khác nhau.
     run_profile = str(os.getenv("DIGEST_RUN_PROFILE", "publish") or "publish").strip().lower()
@@ -111,6 +111,22 @@ def main() -> None:
         import re
         clean = re.sub(r"<[^>]+>", "", summary)
         print("\n" + clean)
+
+
+def main() -> None:
+    args = {arg.strip().lower() for arg in sys.argv[1:] if str(arg or "").strip()}
+    if not args or args == {"--ui"}:
+        from ui_server import main as ui_main
+
+        ui_main()
+        return
+
+    if args & {"--pipeline", "--publish", "--run"}:
+        _run_pipeline_cli()
+        return
+
+    logger.error("Unknown args: %s", " ".join(sorted(args)))
+    logger.info("Use `python3 main.py` để mở UI, hoặc `python3 main.py --pipeline` để chạy publish qua terminal.")
 
 
 if __name__ == "__main__":

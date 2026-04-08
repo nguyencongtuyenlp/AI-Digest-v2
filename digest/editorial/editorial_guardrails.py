@@ -244,6 +244,17 @@ def _prune_opinion_leakage(text: str) -> str:
 
 
 def build_telegram_copy_from_structured(article: dict[str, Any], *, max_len: int = 320) -> str:
+    preferred_copy = str(
+        article.get("telegram_blurb_vi")
+        or article.get("telegram_news_blurb_vi")
+        or article.get("note_summary_vi")
+        or ""
+    ).strip()
+    if preferred_copy:
+        cleaned_preferred = _prune_opinion_leakage(_clean_archive_summary(_strip_note_prefix(preferred_copy)))
+        if cleaned_preferred:
+            return sanitize_delivery_text(cleaned_preferred, max_len=max_len)
+
     factual = str(article.get("factual_summary_vi", "") or "").strip()
     why = str(article.get("why_it_matters_vi", "") or "").strip()
     angle = str(article.get("optional_editorial_angle", "") or "").strip()

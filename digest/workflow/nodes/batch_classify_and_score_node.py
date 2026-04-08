@@ -11,7 +11,11 @@ import os
 from typing import Any
 
 
-from digest.runtime.mlx_runner import resolve_pipeline_mlx_path, run_json_inference_meta
+from digest.runtime.mlx_runner import (
+    resolve_pipeline_mlx_path,
+    run_json_inference_large_meta,
+    run_json_inference_small_meta,
+)
 from digest.runtime.temporal_snapshots import write_temporal_snapshot
 from digest.runtime.xai_grok import grok_classify_enabled, merge_grok_observability
 
@@ -40,6 +44,9 @@ from digest.workflow.nodes.classify_and_score import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Backward compatibility for older tests that patch this symbol directly.
+run_json_inference_meta = run_json_inference_small_meta
 
 
 def _batch_response_format(max_items: int) -> dict[str, Any]:
@@ -83,6 +90,8 @@ def _batch_system_prompt(*, compact_for_light_model: bool = False) -> str:
         "Bạn xử lý nhiều bài viết ĐỘC LẬP. Không so sánh chéo.\n"
         "primary_type CHỈ được dùng các giá trị: Product, Society & Culture, Practical.\n"
         "Mỗi item phải điền đủ factual_summary_vi, why_it_matters_vi, optional_editorial_angle dù ngắn.\n"
+        "factual_summary_vi và why_it_matters_vi phải là câu ngắn, rõ, không lan man, không liệt kê.\n"
+        "Giữ nguyên tên riêng/thuật ngữ tiếng Anh nếu có, nhưng diễn giải phần còn lại bằng tiếng Việt tự nhiên.\n"
         "Trả về đúng JSON với key `articles`. Mỗi item phải có `item_id`.\n"
         "Tuân thủ nghiêm ngặt schema. Không thêm text ngoài JSON."
     )
@@ -309,7 +318,7 @@ def batch_classify_and_score_node(state: dict[str, Any]) -> dict[str, Any]:
             feedback_summary_text=feedback_summary_text,
         )
         fmt = _batch_response_format(len(item_batch))
-        max_tok = max(1800, classify_max_tokens * len(item_batch) * 1.8)
+        max_tok = max(1200, classify_max_tokens * len(item_batch))
         primary_path = light_mlx if use_light_tier else heavy_mlx
         parsed, raw_output, _looks_structured = run_json_inference_meta(
             _batch_system_prompt(compact_for_light_model=use_light_tier),
@@ -327,7 +336,7 @@ def batch_classify_and_score_node(state: dict[str, Any]) -> dict[str, Any]:
                 len(result_map),
                 len(item_batch),
             )
-            parsed_h, raw_h, _ = run_json_inference_meta(
+            parsed_h, raw_h, _ = run_json_inference_large_meta(
                 _batch_system_prompt(compact_for_light_model=False),
                 user_blob,
                 max_tokens=max_tok,
@@ -342,7 +351,7 @@ def batch_classify_and_score_node(state: dict[str, Any]) -> dict[str, Any]:
 
         if not result_map and use_light_tier:
             logger.warning("⚠️ Batch classify (light MLX) thất bại; thử lại batch bằng heavy model.")
-            parsed, raw_output, _looks_structured = run_json_inference_meta(
+            parsed, raw_output, _looks_structured = run_json_inference_large_meta(
                 _batch_system_prompt(compact_for_light_model=False),
                 user_blob,
                 max_tokens=max_tok,

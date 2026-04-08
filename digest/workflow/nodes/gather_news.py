@@ -86,6 +86,8 @@ PROJECT_ROOT = Path(__file__).resolve().parents[3]
 SAFE_DDGS_TEXT_BACKEND = os.getenv("DDGS_TEXT_BACKEND", "duckduckgo").strip().lower() or "duckduckgo"
 MAX_GITHUB_RATIO = 0.30
 MAX_GITHUB_ONLY_ARTICLES = 3
+SOURCE_FETCH_TIMEOUT_SECONDS = 15.0
+RSS_EXTRACT_CONCURRENCY = 6
 REQUEST_HEADERS = {
     "User-Agent": "AvalookDigestBot/1.0 (+https://avalook.local)",
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
@@ -1587,6 +1589,82 @@ def _local_deduplicate_articles(articles: list[dict[str, Any]]) -> list[dict[str
     return deduped
 
 
+async def _run_source_task(name: str, awaitable: Any) -> list[dict[str, Any]]:
+    try:
+        result = await asyncio.wait_for(awaitable, timeout=SOURCE_FETCH_TIMEOUT_SECONDS)
+    except asyncio.TimeoutError:
+        logger.warning("⏱️ %s timeout sau %.0fs, bỏ qua source này.", name, SOURCE_FETCH_TIMEOUT_SECONDS)
+        return []
+    except Exception as exc:
+        logger.warning("⚠️ %s failed: %s", name, exc)
+        return []
+
+    articles = list(result or [])
+    logger.info("   %s: %d bài", name, len(articles))
+    return articles
+
+
+async def _extract_rss_articles_parallel(rss_articles: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    sem = asyncio.Semaphore(RSS_EXTRACT_CONCURRENCY)
+
+    async def _enrich(article: dict[str, Any]) -> dict[str, Any]:
+        url = str(article.get("url", "") or "").strip()
+        if not url or article.get("content"):
+            return article
+        try:
+            async with sem:
+                article["content"] = await asyncio.wait_for(
+                    asyncio.to_thread(_extract_full_text, url),
+                    timeout=12.0,
+                )
+        except asyncio.TimeoutError:
+            logger.debug("RSS extract timeout for %s", url[:80])
+        except Exception as exc:
+            logger.debug("RSS extract failed for %s: %s", url[:80], exc)
+        return article
+
+    return await asyncio.gather(*(_enrich(article) for article in rss_articles))
+
+
+async def _fetch_rss_parallel(hours: int) -> list[dict[str, Any]]:
+    rss_articles = await asyncio.to_thread(_fetch_rss, hours)
+    if not rss_articles:
+        return []
+    return await _extract_rss_articles_parallel(rss_articles)
+
+
+async def _fetch_ddg_parallel(ddg_max_results: int) -> list[dict[str, Any]]:
+    async def _search_query(query: str, *, source: str, timelimit: str) -> list[dict[str, Any]]:
+        results = await asyncio.to_thread(_search_ddg, query, ddg_max_results, timelimit)
+        articles: list[dict[str, Any]] = []
+        for result in results:
+            article = _build_search_article(
+                url=result.get("href") or result.get("link", ""),
+                title=result.get("title", ""),
+                snippet=result.get("body", ""),
+                source=source,
+                published=result.get("date", "") or result.get("published", ""),
+                query_context=query,
+            )
+            if article:
+                articles.append(article)
+        return articles
+
+    tasks = [
+        _search_query(query, source="DuckDuckGo (EN)", timelimit="w")
+        for query in SEARCH_QUERIES_EN
+    ]
+    tasks.extend(
+        _search_query(query, source="DuckDuckGo (VN)", timelimit="m")
+        for query in build_search_queries_vn()
+    )
+    results = await asyncio.gather(*tasks)
+    articles: list[dict[str, Any]] = []
+    for batch in results:
+        articles.extend(batch)
+    return articles
+
+
 def gather_news_node(state: dict[str, Any]) -> dict[str, Any]:
     """
     LangGraph node: thu thập tin tức từ tất cả nguồn.
@@ -1595,8 +1673,6 @@ def gather_news_node(state: dict[str, Any]) -> dict[str, Any]:
     - Nếu một nguồn community/search fail thì pipeline vẫn phải sống.
     - Nguồn lõi là RSS/official feeds; search/community đóng vai trò bổ sung.
     """
-    raw_articles: list[dict[str, Any]] = []
-
     rss_hours = _cfg_int(state, "gather_rss_hours", "GATHER_RSS_HOURS", 72)
     ddg_max_results = _cfg_int(state, "ddg_max_results_per_query", "DDG_MAX_RESULTS_PER_QUERY", 2)
     hn_limit = _cfg_int(state, "hn_max_items", "HN_MAX_ITEMS", 8)
@@ -1660,155 +1736,143 @@ def gather_news_node(state: dict[str, Any]) -> dict[str, Any]:
         source_history_map,
     )
 
-    if enable_rss:
-        logger.info("📡 Fetching curated RSS feeds (%dh qua) …", rss_hours)
-        rss_articles = _fetch_rss(hours=rss_hours)
-        logger.info("   RSS: %d bài", len(rss_articles))
-        for article in rss_articles:
-            url = article.get("url", "")
-            if url and not article.get("content"):
-                article["content"] = _extract_full_text(url)
-            raw_articles.append(article)
-    else:
-        logger.info("⏭️ Skip RSS theo runtime config.")
+    github_repos = list(
+        dict.fromkeys(
+            DEFAULT_GITHUB_REPOS
+            + watchlist_seeds.get("github_repos", [])
+            + _cfg_list(state, "github_watchlist_repos", "GITHUB_WATCHLIST_REPOS")
+        )
+    )
+    github_repos = _maybe_limit(github_repos, github_repo_watchlist_limit)
+    github_orgs = list(
+        dict.fromkeys(
+            DEFAULT_GITHUB_ORGS
+            + watchlist_seeds.get("github_orgs", [])
+            + _cfg_list(state, "github_watchlist_orgs", "GITHUB_WATCHLIST_ORGS")
+        )
+    )
+    github_orgs = _maybe_limit(github_orgs, github_org_limit)
+    github_queries = list(
+        dict.fromkeys(
+            DEFAULT_GITHUB_SEARCH_QUERIES
+            + watchlist_seeds.get("github_queries", [])
+            + _cfg_list(state, "github_search_queries", "GITHUB_SEARCH_QUERIES", separator="||")
+        )
+    )
+    github_queries = _maybe_limit(github_queries, github_query_limit)
+    telegram_channels = [
+        c.strip() for c in str(os.getenv("TELEGRAM_CHANNELS", "") or "").split(",") if c.strip()
+    ] or DEFAULT_TELEGRAM_CHANNELS
 
-    if enable_github:
-        logger.info("🐙 Fetching GitHub repo/tool signals …")
-        github_repos = list(
-            dict.fromkeys(
-                DEFAULT_GITHUB_REPOS
-                + watchlist_seeds.get("github_repos", [])
-                + _cfg_list(state, "github_watchlist_repos", "GITHUB_WATCHLIST_REPOS")
-            )
-        )
-        github_repos = _maybe_limit(github_repos, github_repo_watchlist_limit)
-        github_orgs = list(
-            dict.fromkeys(
-                DEFAULT_GITHUB_ORGS
-                + watchlist_seeds.get("github_orgs", [])
-                + _cfg_list(state, "github_watchlist_orgs", "GITHUB_WATCHLIST_ORGS")
-            )
-        )
-        github_orgs = _maybe_limit(github_orgs, github_org_limit)
-        github_queries = list(
-            dict.fromkeys(
-                DEFAULT_GITHUB_SEARCH_QUERIES
-                + watchlist_seeds.get("github_queries", [])
-                + _cfg_list(state, "github_search_queries", "GITHUB_SEARCH_QUERIES", separator="||")
-            )
-        )
-        github_queries = _maybe_limit(github_queries, github_query_limit)
-        github_articles = _fetch_github_articles(
-            repo_watchlist=github_repos,
-            org_watchlist=github_orgs,
-            query_watchlist=github_queries,
-            max_releases_per_repo=github_release_limit,
-            max_org_repos=github_org_repo_limit,
-            max_search_results=github_search_limit,
-        )
-        logger.info("   GitHub: %d bài", len(github_articles))
-        raw_articles.extend(github_articles)
-    else:
-        logger.info("⏭️ Skip GitHub theo runtime config.")
+    async def _collect_base_sources() -> list[dict[str, Any]]:
+        source_order: list[tuple[str, asyncio.Future[Any]]] = []
 
-    if enable_social_signals:
-        logger.info("👥 Loading manual social signals …")
-        social_articles = _build_social_signal_articles()
-        logger.info("   Social signals: %d bài", len(social_articles))
-        raw_articles.extend(social_articles)
-    else:
-        logger.info("⏭️ Skip manual social signals theo runtime config.")
-
-    facebook_auto_articles: list[dict[str, Any]] = []
-    if facebook_auto_enabled:
-        facebook_auto_articles = _build_facebook_auto_articles(
-            state,
-            targets=list(facebook_registry.get("auto_active_sources", []) or []),
-        )
-        if facebook_auto_articles:
-            logger.info("📘 Facebook auto: %d bài", len(facebook_auto_articles))
-            raw_articles.extend(facebook_auto_articles)
+        if enable_rss:
+            logger.info("📡 Fetching curated RSS feeds (%dh qua) …", rss_hours)
+            source_order.append(("RSS", _run_source_task("RSS", _fetch_rss_parallel(rss_hours))))
         else:
-            logger.info("📘 Facebook auto: 0 bài")
+            logger.info("⏭️ Skip RSS theo runtime config.")
 
-    if enable_watchlist:
-        logger.info("🧭 Loading watchlist seeds …")
-        watchlist_articles = _build_watchlist_articles()
-        logger.info("   Watchlist: %d bài", len(watchlist_articles))
-        raw_articles.extend(watchlist_articles)
-    else:
-        logger.info("⏭️ Skip watchlist theo runtime config.")
+        if enable_github:
+            logger.info("🐙 Fetching GitHub repo/tool signals …")
+            source_order.append(
+                (
+                    "GitHub",
+                    _run_source_task(
+                        "GitHub",
+                        asyncio.to_thread(
+                            _fetch_github_articles,
+                            repo_watchlist=github_repos,
+                            org_watchlist=github_orgs,
+                            query_watchlist=github_queries,
+                            max_releases_per_repo=github_release_limit,
+                            max_org_repos=github_org_repo_limit,
+                            max_search_results=github_search_limit,
+                        ),
+                    ),
+                )
+            )
+        else:
+            logger.info("⏭️ Skip GitHub theo runtime config.")
 
-    if enable_hn:
-        logger.info("🗞️ Fetching Hacker News AI signals …")
-        hn_articles = _fetch_hacker_news(limit=hn_limit)
-        logger.info("   Hacker News: %d bài", len(hn_articles))
-        raw_articles.extend(hn_articles)
-    else:
-        logger.info("⏭️ Skip Hacker News theo runtime config.")
+        if enable_social_signals:
+            logger.info("👥 Loading manual social signals …")
+            source_order.append(
+                ("Social signals", _run_source_task("Social signals", asyncio.to_thread(_build_social_signal_articles)))
+            )
+        else:
+            logger.info("⏭️ Skip manual social signals theo runtime config.")
 
-    if enable_reddit:
-        logger.info("👥 Fetching Reddit AI signals …")
-        reddit_articles = _fetch_reddit_posts(limit_per_subreddit=reddit_limit)
-        logger.info("   Reddit: %d bài", len(reddit_articles))
-        raw_articles.extend(reddit_articles)
-    else:
-        logger.info("⏭️ Skip Reddit theo runtime config.")
+        if facebook_auto_enabled:
+            logger.info("📘 Fetching Facebook auto sources …")
+            source_order.append(
+                (
+                    "Facebook auto",
+                    _run_source_task(
+                        "Facebook auto",
+                        asyncio.to_thread(
+                            _build_facebook_auto_articles,
+                            state,
+                            targets=list(facebook_registry.get("auto_active_sources", []) or []),
+                        ),
+                    ),
+                )
+            )
+
+        if enable_watchlist:
+            logger.info("🧭 Loading watchlist seeds …")
+            source_order.append(("Watchlist", _run_source_task("Watchlist", asyncio.to_thread(_build_watchlist_articles))))
+        else:
+            logger.info("⏭️ Skip watchlist theo runtime config.")
+
+        if enable_hn:
+            logger.info("🗞️ Fetching Hacker News AI signals …")
+            source_order.append(
+                ("Hacker News", _run_source_task("Hacker News", asyncio.to_thread(_fetch_hacker_news, hn_limit)))
+            )
+        else:
+            logger.info("⏭️ Skip Hacker News theo runtime config.")
+
+        if enable_reddit:
+            logger.info("👥 Fetching Reddit AI signals …")
+            source_order.append(
+                ("Reddit", _run_source_task("Reddit", asyncio.to_thread(_fetch_reddit_posts, reddit_limit)))
+            )
+        else:
+            logger.info("⏭️ Skip Reddit theo runtime config.")
+
+        if enable_ddg:
+            logger.info("🔍 Searching DuckDuckGo supplemental sources …")
+            source_order.append(("DuckDuckGo", _run_source_task("DuckDuckGo", _fetch_ddg_parallel(ddg_max_results))))
+        else:
+            logger.info("⏭️ Skip DDG theo runtime config.")
+
+        if enable_telegram_channels:
+            logger.info("📱 Reading Telegram channels …")
+            source_order.append(
+                (
+                    "Telegram channels",
+                    _run_source_task("Telegram channels", _read_telegram_channels(telegram_channels)),
+                )
+            )
+        else:
+            logger.info("⏭️ Skip Telegram channels theo runtime config.")
+
+        if not source_order:
+            return []
+
+        results = await asyncio.gather(*(task for _name, task in source_order))
+        raw_articles: list[dict[str, Any]] = []
+        for batch in results:
+            raw_articles.extend(batch)
+        return raw_articles
+
+    raw_articles = asyncio.run(_collect_base_sources())
 
     grok_x_scout_articles = _run_grok_x_scout(state, raw_articles)
     if grok_x_scout_articles:
         logger.info("🧠 Grok X scout bổ sung: %d bài", len(grok_x_scout_articles))
         raw_articles.extend(grok_x_scout_articles)
-
-    if enable_ddg:
-        logger.info("🔍 Searching English AI sources (supplemental) …")
-        for query in SEARCH_QUERIES_EN:
-            for result in _search_ddg(query, max_results=ddg_max_results, timelimit="w"):
-                url = result.get("href") or result.get("link", "")
-                title = result.get("title", "")
-                snippet = result.get("body", "")
-                article = _build_search_article(
-                    url=url,
-                    title=title,
-                    snippet=snippet,
-                    source="DuckDuckGo (EN)",
-                    published=result.get("date", "") or result.get("published", ""),
-                    query_context=query,
-                )
-                if article:
-                    raw_articles.append(article)
-
-        logger.info("🔍 Searching Vietnamese AI sources (supplemental) …")
-        for query in build_search_queries_vn():
-            for result in _search_ddg(query, max_results=ddg_max_results, timelimit="m"):
-                url = result.get("href") or result.get("link", "")
-                title = result.get("title", "")
-                snippet = result.get("body", "")
-                article = _build_search_article(
-                    url=url,
-                    title=title,
-                    snippet=snippet,
-                    source="DuckDuckGo (VN)",
-                    published=result.get("date", "") or result.get("published", ""),
-                    query_context=query,
-                )
-                if article:
-                    raw_articles.append(article)
-    else:
-        logger.info("⏭️ Skip DDG theo runtime config.")
-
-    if enable_telegram_channels:
-        logger.info("📱 Reading Telegram channels …")
-        channels_str = os.getenv("TELEGRAM_CHANNELS", "")
-        channels = [c.strip() for c in channels_str.split(",") if c.strip()] or DEFAULT_TELEGRAM_CHANNELS
-        try:
-            telegram_articles = asyncio.run(_read_telegram_channels(channels))
-        except RuntimeError:
-            telegram_articles = []
-        logger.info("   Telegram channels: %d bài", len(telegram_articles))
-        raw_articles.extend(telegram_articles)
-    else:
-        logger.info("⏭️ Skip Telegram channels theo runtime config.")
 
     grok_scout_articles = _run_grok_scout(state, raw_articles)
     if grok_scout_articles:

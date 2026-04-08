@@ -4,12 +4,13 @@ batch_deep_process_node.py — Gộp deep_analysis + recommend_idea + compose_no
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any
 
 
 from digest.editorial.editorial_guardrails import build_article_grounding, sanitize_delivery_text
-from digest.runtime.mlx_runner import resolve_pipeline_mlx_path, run_json_inference_meta
+from digest.runtime.mlx_runner import resolve_pipeline_mlx_path, run_json_inference_large_meta
 from digest.workflow.nodes.compose_note_summary import NOTE_SUMMARY_SYSTEM, _fallback_note
 from digest.workflow.nodes.deep_analysis import (
     DEEP_ANALYSIS_SYSTEM,
@@ -20,6 +21,9 @@ from digest.workflow.nodes.deep_analysis import (
 from digest.workflow.nodes.recommend_idea import RECOMMEND_SYSTEM
 
 logger = logging.getLogger(__name__)
+
+# Backward compatibility for older tests that patch this symbol directly.
+run_json_inference_meta = run_json_inference_large_meta
 
 
 def _batch_response_format(max_items: int) -> dict[str, Any]:
@@ -64,7 +68,8 @@ def _batch_system_prompt() -> str:
         "Với MỖI bài, bạn PHẢI trả về đúng 3 phần sau và giữ NGUYÊN chất lượng, tone, cấu trúc như khi chạy riêng lẻ:\n"
         "1. deep_analysis: Phân tích sâu, có cấu trúc đầy đủ (Executive Note, Evidence, Caveats...).\n"
         "2. recommend_idea: Ý tưởng hành động cụ thể, actionable, founder-grade theo format cũ.\n"
-        "3. note_summary_vi: Tóm tắt tiếng Việt ngắn gọn, sắc bén, hấp dẫn phù hợp Telegram.\n"
+        "3. note_summary_vi: Đúng 1 đoạn tiếng Việt ngắn, trung tính, giàu thông tin, đọc như wire copy cho bản tin công nghệ nhanh.\n"
+        "note_summary_vi chỉ nên 45-80 từ, 1-2 câu, không bullet, không kết luận kiểu khuyến nghị, không lặp tiêu đề.\n"
         "Xử lý từng item hoàn toàn độc lập. Không lẫn thông tin giữa các bài. Chỉ trả về JSON thuần."
     )
 
@@ -144,7 +149,7 @@ def _build_batch_user_prompt(batch: list[tuple[str, dict[str, Any]]]) -> str:
             + "YÊU CẦU OUTPUT CHO BÀI NÀY:\n"
             "- deep_analysis: phân tích sâu theo cấu trúc cũ\n"
             "- recommend_idea: ý tưởng hành động cụ thể, founder-grade\n"
-            "- note_summary_vi: tóm tắt tiếng Việt ngắn gọn, sắc bén\n"
+            "- note_summary_vi: đúng 1 đoạn 45-80 từ, 1-2 câu, mở bằng fact/diễn biến chính, không bullet, không hype, không lời khuyên hành động\n"
         )
         blocks.append(block)
     return "\n\n".join(blocks)
@@ -194,22 +199,31 @@ def batch_deep_process_node(state: dict[str, Any]) -> dict[str, Any]:
         chunk = top_articles[i : i + CHUNK_SIZE]
         batch: list[tuple[str, dict[str, Any]]] = []
 
-        for idx, article in enumerate(chunk, 1):
-            keyword = str(article.get("title", "") or "").split(" – ")[0].split(" | ")[0][:80]
-            if str(article.get("community_reactions", "") or "").strip():
-                community = str(article.get("community_reactions", "") or "")
-            elif keyword in community_cache:
-                community = community_cache[keyword]
-            else:
-                community = _search_community_reactions(keyword) or "Chưa có dữ liệu cộng đồng"
-                community_cache[keyword] = community
-            article["community_reactions"] = community
+        async def _hydrate_article(idx: int, article: dict[str, Any], sem: asyncio.Semaphore) -> tuple[str, dict[str, Any]]:
+            async with sem:
+                keyword = str(article.get("title", "") or "").split(" – ")[0].split(" | ")[0][:80]
+                if str(article.get("community_reactions", "") or "").strip():
+                    community = str(article.get("community_reactions", "") or "")
+                elif keyword in community_cache:
+                    community = community_cache[keyword]
+                else:
+                    community = await asyncio.to_thread(_search_community_reactions, keyword)
+                    community = community or "Chưa có dữ liệu cộng đồng"
+                    community_cache[keyword] = community
+                article["community_reactions"] = community
 
-            grounding = _existing_grounding(article) or build_article_grounding(article)
-            article.update(grounding)
-            article["_mvp3_grounding"] = grounding
-            article["_deep_process_content"] = _deep_process_source_context(article, raw_limit=raw_limit)
-            batch.append((f"top_{i+idx}", article))
+                grounding = _existing_grounding(article) or build_article_grounding(article)
+                article.update(grounding)
+                article["_mvp3_grounding"] = grounding
+                article["_deep_process_content"] = _deep_process_source_context(article, raw_limit=raw_limit)
+                return f"top_{i+idx}", article
+
+        async def _hydrate_chunk() -> list[tuple[str, dict[str, Any]]]:
+            sem = asyncio.Semaphore(2)
+            tasks = [_hydrate_article(idx, article, sem) for idx, article in enumerate(chunk, 1)]
+            return await asyncio.gather(*tasks)
+
+        batch = asyncio.run(_hydrate_chunk())
 
         logger.info("🔬 Batch deep process chunk %d/%d (%d bài)", i//CHUNK_SIZE + 1, (len(top_articles)+CHUNK_SIZE-1)//CHUNK_SIZE, len(batch))
 
@@ -217,14 +231,11 @@ def batch_deep_process_node(state: dict[str, Any]) -> dict[str, Any]:
         parsed, raw_output, _ = run_json_inference_meta(
             _batch_system_prompt(),
             _build_batch_user_prompt(batch),
-            max_tokens=max(4200 * len(batch), 9500),   # Tăng đáng kể
-            temperature=0.25,                         # Giảm để ổn định
+            max_tokens=max(2600 * len(batch), 7000),
+            temperature=0.2,
             model_path=heavy_mlx,
             response_format=_batch_response_format(len(batch)),
         )
-
-        # Phần xử lý parsed + fallback giữ nguyên logic cũ của Codex
-        # (copy nguyên phần result_map, _fallback_bundle, pop _mvp3_grounding từ file bạn paste)
 
         result_map = {str(item.get("item_id")): item for item in (parsed.get("articles", []) if isinstance(parsed, dict) else [])}
         

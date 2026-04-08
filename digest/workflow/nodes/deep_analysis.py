@@ -13,12 +13,13 @@ Output:
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any
 
 # Đảm bảo project root nằm trong sys.path
 from digest.editorial.editorial_guardrails import build_article_grounding
-from digest.runtime.mlx_runner import resolve_pipeline_mlx_path, run_inference
+from digest.runtime.mlx_runner import resolve_pipeline_mlx_path, run_inference_large
 
 logger = logging.getLogger(__name__)
 SAFE_DDGS_TEXT_BACKEND = "duckduckgo"
@@ -202,72 +203,77 @@ def deep_analysis_node(state: dict[str, Any]) -> dict[str, Any]:
     runtime_config = dict(state.get("runtime_config", {}) or {})
     heavy_mlx = resolve_pipeline_mlx_path("heavy", runtime_config)
 
-    for i, article in enumerate(top_articles, 1):
-        title = article.get("title", "N/A")
-        logger.info("🔬 Deep Analysis [%d/%d]: %s", i, total, title[:60])
+    async def _analyze_one(index: int, article: dict[str, Any], sem: asyncio.Semaphore) -> dict[str, Any]:
+        async with sem:
+            title = article.get("title", "N/A")
+            logger.info("🔬 Deep Analysis [%d/%d]: %s", index, total, title[:60])
 
-        # ── Bước 1: Tìm phản ứng cộng đồng ────────────────────────
-        keyword = title.split(" – ")[0].split(" | ")[0][:80]
-        community = _search_community_reactions(keyword)
-        if community:
-            logger.info("   📡 Tìm thấy %d dòng phản ứng cộng đồng", community.count("\n") + 1)
-        else:
-            community = "Chưa có dữ liệu cộng đồng"
+            keyword = title.split(" – ")[0].split(" | ")[0][:80]
+            community = await asyncio.to_thread(_search_community_reactions, keyword)
+            if community:
+                logger.info("   📡 Tìm thấy %d dòng phản ứng cộng đồng", community.count("\n") + 1)
+            else:
+                community = "Chưa có dữ liệu cộng đồng"
 
-        # ── Bước 2: Context bài cũ liên quan (từ memory) ───────────
-        related = article.get("related_past", [])
-        related_text = ""
-        if related:
-            lines = []
-            for r in related[:3]:
-                lines.append(f"- [{r.get('primary_type', '?')}] {r.get('title', 'N/A')} (score: {r.get('score', 0)})")
-            related_text = "\n".join(lines)
-        else:
-            related_text = "(Không có bài cũ cùng chủ đề trong memory)"
+            related = article.get("related_past", [])
+            if related:
+                lines = [
+                    f"- [{r.get('primary_type', '?')}] {r.get('title', 'N/A')} (score: {r.get('score', 0)})"
+                    for r in related[:3]
+                ]
+                related_text = "\n".join(lines)
+            else:
+                related_text = "(Không có bài cũ cùng chủ đề trong memory)"
 
-        article["community_reactions"] = community
-        grounding = build_article_grounding(article)
-        article.update(grounding)
+            article["community_reactions"] = community
+            grounding = build_article_grounding(article)
+            article.update(grounding)
 
-        # ── Bước 3: LLM phân tích sâu ──────────────────────────────
-        user_prompt = DEEP_ANALYSIS_USER_TEMPLATE.format(
-            title=title,
-            primary_type=article.get("primary_type", "Unknown"),
-            total_score=article.get("total_score", 0),
-            editorial_angle=article.get("editorial_angle", "N/A"),
-            url=article.get("url", ""),
-            source=article.get("source", "Unknown"),
-            source_domain=article.get("source_domain", ""),
-            published_at=article.get("published_at", article.get("published", "")),
-            source_verified=article.get("source_verified", False),
-            source_tier=article.get("source_tier", "unknown"),
-            grounding_note=grounding.get("grounding_note", ""),
-            fact_anchors=grounding.get("fact_anchors_text", "- Chưa có fact anchor mạnh."),
-            reasonable_inferences=grounding.get("reasonable_inferences_text", "- Không có suy luận bổ sung."),
-            unknowns=grounding.get("unknowns_text", "- Không có unknown lớn từ metadata."),
-            content=(article.get("content", "") or article.get("snippet", ""))[:3000],
-            community_reactions=community[:2000],
-            related_past=related_text,
-        )
-
-        try:
-            analysis = run_inference(
-                DEEP_ANALYSIS_SYSTEM,
-                user_prompt,
-                max_tokens=2200,
-                temperature=0.3,
-                model_path=heavy_mlx,
+            user_prompt = DEEP_ANALYSIS_USER_TEMPLATE.format(
+                title=title,
+                primary_type=article.get("primary_type", "Unknown"),
+                total_score=article.get("total_score", 0),
+                editorial_angle=article.get("editorial_angle", "N/A"),
+                url=article.get("url", ""),
+                source=article.get("source", "Unknown"),
+                source_domain=article.get("source_domain", ""),
+                published_at=article.get("published_at", article.get("published", "")),
+                source_verified=article.get("source_verified", False),
+                source_tier=article.get("source_tier", "unknown"),
+                grounding_note=grounding.get("grounding_note", ""),
+                fact_anchors=grounding.get("fact_anchors_text", "- Chưa có fact anchor mạnh."),
+                reasonable_inferences=grounding.get("reasonable_inferences_text", "- Không có suy luận bổ sung."),
+                unknowns=grounding.get("unknowns_text", "- Không có unknown lớn từ metadata."),
+                content=(article.get("content", "") or article.get("snippet", ""))[:3000],
+                community_reactions=community[:2000],
+                related_past=related_text,
             )
-            analysis = _ensure_evidence_sections(analysis, grounding)
-            article["deep_analysis"] = analysis
-            article["content_page_md"] = analysis
-            logger.info("   ✅ Phân tích xong (%d chars)", len(analysis))
-        except Exception as e:
-            logger.error("   ❌ Deep analysis failed: %s", e)
-            article["deep_analysis"] = "Không thể phân tích sâu — lỗi hệ thống."
-            article["content_page_md"] = article["deep_analysis"]
 
-        analyzed.append(article)
+            try:
+                analysis = await asyncio.to_thread(
+                    run_inference_large,
+                    DEEP_ANALYSIS_SYSTEM,
+                    user_prompt,
+                    2200,
+                    0.3,
+                    heavy_mlx,
+                )
+                analysis = _ensure_evidence_sections(analysis, grounding)
+                article["deep_analysis"] = analysis
+                article["content_page_md"] = analysis
+                logger.info("   ✅ Phân tích xong (%d chars)", len(analysis))
+            except Exception as e:
+                logger.error("   ❌ Deep analysis failed: %s", e)
+                article["deep_analysis"] = "Không thể phân tích sâu — lỗi hệ thống."
+                article["content_page_md"] = article["deep_analysis"]
+            return article
+
+    async def _run_parallel() -> list[dict[str, Any]]:
+        sem = asyncio.Semaphore(2)
+        tasks = [_analyze_one(index, article, sem) for index, article in enumerate(top_articles, 1)]
+        return await asyncio.gather(*tasks)
+
+    analyzed = asyncio.run(_run_parallel())
 
     logger.info("✅ Deep Analysis hoàn tất: %d bài", len(analyzed))
     return {"analyzed_articles": analyzed}
