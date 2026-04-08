@@ -11,7 +11,7 @@ import os
 from typing import Any
 
 
-from digest.runtime.mlx_runner import run_json_inference_meta
+from digest.runtime.mlx_runner import resolve_pipeline_mlx_path, run_json_inference_meta
 from digest.runtime.temporal_snapshots import write_temporal_snapshot
 from digest.runtime.xai_grok import grok_classify_enabled, merge_grok_observability
 
@@ -76,8 +76,8 @@ def _batch_response_format(max_items: int) -> dict[str, Any]:
     }
 
 
-def _batch_system_prompt() -> str:
-    return (
+def _batch_system_prompt(*, compact_for_light_model: bool = False) -> str:
+    base = (
         f"{CLASSIFY_SCORE_SYSTEM}\n\n"
         "# // MVP3 Speed Optimized - Batch + Parallel\n"
         "Bạn xử lý nhiều bài viết ĐỘC LẬP. Không so sánh chéo.\n"
@@ -86,6 +86,13 @@ def _batch_system_prompt() -> str:
         "Trả về đúng JSON với key `articles`. Mỗi item phải có `item_id`.\n"
         "Tuân thủ nghiêm ngặt schema. Không thêm text ngoài JSON."
     )
+    if compact_for_light_model:
+        base += (
+            "\n\n# FAST LOCAL MODEL\n"
+            "factual_summary_vi và why_it_matters_vi mỗi field 1-2 câu ngắn, đủ ý; "
+            "optional_editorial_angle có thể một cụm ngắn. Bám chặt schema JSON.\n"
+        )
+    return base
 def _build_batch_user_prompt(
     batch: list[tuple[str, dict[str, Any]]],
     *,
@@ -164,6 +171,7 @@ def _fallback_single_article(
     classify_max_tokens: int,
     feedback_summary_text: str,
     runtime_config: dict[str, Any] | None = None,
+    heavy_mlx_path: str | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     user_prompt = CLASSIFY_SCORE_USER_TEMPLATE.format(
         title=article.get("title", "N/A"),
@@ -193,6 +201,7 @@ def _fallback_single_article(
         "classify_benchmark_success_count": 0,
     }
     try:
+        heavy = heavy_mlx_path or resolve_pipeline_mlx_path("heavy", runtime_config)
         result, json_status, raw_output, provider_used, details = _resolve_classify_inference_details(
             user_prompt,
             max_tokens=classify_max_tokens,
@@ -203,8 +212,10 @@ def _fallback_single_article(
                 max_tokens=classify_max_tokens,
                 temperature=0.1,
                 response_format=CLASSIFY_RESPONSE_FORMAT,
+                model_path=heavy,
             ),
             runtime_config=runtime_config,
+            local_model_path=heavy,
         )
         article["classify_provider_used"] = str(provider_used or "local")
         if result and isinstance(result, dict):
@@ -279,6 +290,10 @@ def batch_classify_and_score_node(state: dict[str, Any]) -> dict[str, Any]:
     classify_benchmark_success_count = 0
     classify_provider_counts = {"local": 0, "grok": 0, "local_then_grok": 0}
 
+    light_mlx = resolve_pipeline_mlx_path("light", runtime_config)
+    heavy_mlx = resolve_pipeline_mlx_path("heavy", runtime_config)
+    use_light_tier = light_mlx != heavy_mlx
+
     for batch_index in range(0, len(llm_articles), batch_size):
         batch_articles = llm_articles[batch_index: batch_index + batch_size]
         item_batch = [(f"article_{batch_index + offset}", article) for offset, article in enumerate(batch_articles)]
@@ -288,18 +303,54 @@ def batch_classify_and_score_node(state: dict[str, Any]) -> dict[str, Any]:
             max(1, math.ceil(len(llm_articles) / batch_size)),
             len(item_batch),
         )
+        user_blob = _build_batch_user_prompt(
+            item_batch,
+            classify_content_limit=classify_content_limit,
+            feedback_summary_text=feedback_summary_text,
+        )
+        fmt = _batch_response_format(len(item_batch))
+        max_tok = max(1800, classify_max_tokens * len(item_batch) * 1.8)
+        primary_path = light_mlx if use_light_tier else heavy_mlx
         parsed, raw_output, _looks_structured = run_json_inference_meta(
-            _batch_system_prompt(),
-            _build_batch_user_prompt(
-                item_batch,
-                classify_content_limit=classify_content_limit,
-                feedback_summary_text=feedback_summary_text,
-            ),
-            max_tokens=max(1800, classify_max_tokens * len(item_batch) * 1.8),
+            _batch_system_prompt(compact_for_light_model=use_light_tier),
+            user_blob,
+            max_tokens=max_tok,
             temperature=0.1,
-            response_format=_batch_response_format(len(item_batch)),
+            model_path=primary_path,
+            response_format=fmt,
         )
         result_map, batch_json_status = _extract_batch_result_map(parsed, raw_output)
+
+        if use_light_tier and result_map and len(result_map) < len(item_batch):
+            logger.warning(
+                "⚠️ Batch classify light thiếu item (%d/%d); thử lại batch bằng heavy.",
+                len(result_map),
+                len(item_batch),
+            )
+            parsed_h, raw_h, _ = run_json_inference_meta(
+                _batch_system_prompt(compact_for_light_model=False),
+                user_blob,
+                max_tokens=max_tok,
+                temperature=0.1,
+                model_path=heavy_mlx,
+                response_format=fmt,
+            )
+            alt_map, alt_status = _extract_batch_result_map(parsed_h, raw_h)
+            if len(alt_map) >= len(result_map):
+                result_map, batch_json_status = alt_map, alt_status
+                raw_output = raw_h
+
+        if not result_map and use_light_tier:
+            logger.warning("⚠️ Batch classify (light MLX) thất bại; thử lại batch bằng heavy model.")
+            parsed, raw_output, _looks_structured = run_json_inference_meta(
+                _batch_system_prompt(compact_for_light_model=False),
+                user_blob,
+                max_tokens=max_tok,
+                temperature=0.1,
+                model_path=heavy_mlx,
+                response_format=fmt,
+            )
+            result_map, batch_json_status = _extract_batch_result_map(parsed, raw_output)
 
         if not result_map:
             logger.warning("⚠️ Batch classify không parse được JSON ổn định; fallback từng bài.")
@@ -324,6 +375,7 @@ def batch_classify_and_score_node(state: dict[str, Any]) -> dict[str, Any]:
                     classify_max_tokens=classify_max_tokens,
                     feedback_summary_text=feedback_summary_text,
                     runtime_config=runtime_config,
+                    heavy_mlx_path=heavy_mlx,
                 )
                 provider_key = str(article.get("classify_provider_used", "local") or "local")
                 if provider_key not in classify_provider_counts:

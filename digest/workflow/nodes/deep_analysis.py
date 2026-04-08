@@ -18,7 +18,7 @@ from typing import Any
 
 # Đảm bảo project root nằm trong sys.path
 from digest.editorial.editorial_guardrails import build_article_grounding
-from digest.runtime.mlx_runner import run_inference
+from digest.runtime.mlx_runner import resolve_pipeline_mlx_path, run_inference
 
 logger = logging.getLogger(__name__)
 SAFE_DDGS_TEXT_BACKEND = "duckduckgo"
@@ -199,6 +199,8 @@ def deep_analysis_node(state: dict[str, Any]) -> dict[str, Any]:
 
     analyzed = []
     total = len(top_articles)
+    runtime_config = dict(state.get("runtime_config", {}) or {})
+    heavy_mlx = resolve_pipeline_mlx_path("heavy", runtime_config)
 
     for i, article in enumerate(top_articles, 1):
         title = article.get("title", "N/A")
@@ -254,6 +256,7 @@ def deep_analysis_node(state: dict[str, Any]) -> dict[str, Any]:
                 user_prompt,
                 max_tokens=2200,
                 temperature=0.3,
+                model_path=heavy_mlx,
             )
             analysis = _ensure_evidence_sections(analysis, grounding)
             article["deep_analysis"] = analysis

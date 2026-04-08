@@ -24,7 +24,7 @@ from digest.editorial.delivery_policy import (
     source_quality_rank,
 )
 from digest.editorial.digest_formatter import canonical_type_name, type_emoji
-from digest.runtime.mlx_runner import run_json_inference
+from digest.runtime.mlx_runner import resolve_pipeline_mlx_path, run_json_inference
 from digest.runtime.xai_grok import (
     grok_delivery_enabled,
     grok_delivery_max_articles,
@@ -379,8 +379,13 @@ def _deterministic_delivery_assessment(article: dict[str, Any]) -> dict[str, Any
     }
 
 def _is_facebook_topic_article(article: dict[str, Any]) -> bool:
-    # Facebook lane riêng đã bị loại khỏi delivery path.
-    return False
+    if str(article.get("social_platform", "") or "").strip().lower() == "facebook":
+        return True
+    domain = str(article.get("source_domain", "") or "").strip().lower()
+    if domain in FACEBOOK_TOPIC_DOMAINS:
+        return True
+    url = str(article.get("url", "") or "").strip().lower()
+    return any(host in url for host in ("facebook.com", "fb.com", "fb.watch"))
 
 
 def _facebook_topic_delivery_assessment(
@@ -843,16 +848,22 @@ def _select_main_brief_candidates(
         if _passes_main_brief_quality_floor(strongest_preferred, selection_context):
             selected.append(strongest_preferred)
 
+    max_items = int(selection_context.get("max_items", MAIN_BRIEF_MAX_ITEMS))
     for article in ordered:
         if article in selected:
             continue
-        if len(selected) >= int(selection_context.get("max_items", MAIN_BRIEF_MAX_ITEMS)):
+        if len(selected) >= max_items:
             break
         if not _passes_main_brief_quality_floor(article, selection_context):
             continue
         selected.append(article)
 
-    return selected[: int(selection_context.get("max_items", MAIN_BRIEF_MAX_ITEMS))]
+    # Khi đã include ở lớp judge nhưng floor chọn main rỗng (vd. official_gap + nguồn unknown),
+    # vẫn giữ top theo điểm để brief/Telegram không rỗng.
+    if not selected and ordered:
+        selected = ordered[:max_items]
+
+    return selected[:max_items]
 
 
 def _selection_skip_reason(article: dict[str, Any], selection_context: dict[str, Any]) -> tuple[str, str]:
@@ -1190,6 +1201,7 @@ def delivery_judge_node(state: dict[str, Any]) -> dict[str, Any]:
                     ),
                     max_tokens=250,
                     temperature=0.1,
+                    model_path=resolve_pipeline_mlx_path("heavy", runtime_config),
                     response_format=DELIVERY_JUDGE_RESPONSE_FORMAT,
                 )
             except Exception as exc:
@@ -1228,6 +1240,22 @@ def delivery_judge_node(state: dict[str, Any]) -> dict[str, Any]:
         reviewed_articles=reviewed_articles,
         state=state,
     )
+    facebook_includes = [
+        article
+        for article in reviewed_articles
+        if _is_facebook_topic_article(article)
+        and str(article.get("delivery_decision", "") or "").strip().lower() == "include"
+    ]
+    if facebook_includes:
+        seen_tc = {
+            str(article.get("url", "") or article.get("title", "") or id(article))
+            for article in telegram_candidates
+        }
+        for article in facebook_includes:
+            key = str(article.get("url", "") or article.get("title", "") or id(article))
+            if key not in seen_tc:
+                telegram_candidates.append(article)
+                seen_tc.add(key)
     final_editor_metrics = _apply_grok_final_editor_pass(
         telegram_candidates,
         runtime_config=runtime_config,

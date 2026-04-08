@@ -16,7 +16,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from digest.runtime.mlx_runner import run_inference
+from digest.runtime.mlx_runner import resolve_pipeline_mlx_path, run_inference
 
 logger = logging.getLogger(__name__)
 
@@ -80,6 +80,8 @@ def recommend_idea_node(state: dict[str, Any]) -> dict[str, Any]:
         return {"analyzed_articles": []}
 
     total = len(articles)
+    runtime_config = dict(state.get("runtime_config", {}) or {})
+    heavy_mlx = resolve_pipeline_mlx_path("heavy", runtime_config)
 
     for i, article in enumerate(articles, 1):
         title = article.get("title", "N/A")
@@ -99,6 +101,7 @@ def recommend_idea_node(state: dict[str, Any]) -> dict[str, Any]:
                 user_prompt,
                 max_tokens=1000,
                 temperature=0.6,
+                model_path=heavy_mlx,
             )
             article["recommend_idea"] = recommend
             logger.info("   ✅ Recommend xong (%d chars)", len(recommend))

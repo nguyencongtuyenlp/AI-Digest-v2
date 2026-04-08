@@ -5,11 +5,13 @@ batch_quick_compose_node.py — Batch short note cho low_score_articles.
 from __future__ import annotations
 
 import logging
+import math
 from typing import Any
 
 
 from digest.editorial.editorial_guardrails import build_article_grounding, sanitize_delivery_text
-from digest.runtime.mlx_runner import run_json_inference_meta
+from digest.runtime.mlx_runner import resolve_pipeline_mlx_path, run_json_inference_meta
+from digest.workflow.nodes.classify_and_score import _cfg_int
 from digest.workflow.nodes.compose_note_summary import NOTE_SUMMARY_SYSTEM, NOTE_SUMMARY_USER_TEMPLATE, _analysis_excerpt, _fallback_note
 
 logger = logging.getLogger(__name__)
@@ -45,8 +47,8 @@ def _batch_response_format(max_items: int) -> dict[str, Any]:
     }
 
 
-def _batch_system_prompt() -> str:
-    return (
+def _batch_system_prompt(*, compact_for_light_model: bool = False) -> str:
+    base = (
         f"{NOTE_SUMMARY_SYSTEM}\n\n"
         "# // MVP3 Speed Optimized - Batch + Parallel\n"
         "Bạn sẽ nén nhiều bài viết trong một lần gọi.\n"
@@ -54,6 +56,9 @@ def _batch_system_prompt() -> str:
         "Mỗi item phải có `item_id` và `note_summary_vi`.\n"
         "Không bỏ sót item. Không thêm prose ngoài JSON."
     )
+    if compact_for_light_model:
+        base += "\n\n# FAST MODEL: note_summary_vi 2-4 câu ngắn, bám fact trong payload.\n"
+    return base
 
 
 def _build_batch_user_prompt(batch: list[tuple[str, dict[str, Any]]]) -> str:
@@ -105,18 +110,75 @@ def batch_quick_compose_node(state: dict[str, Any]) -> dict[str, Any]:
         logger.info("⚡ Batch quick compose: dùng deterministic fallback cho %d bài", len(batch))
         return {"low_score_articles": [article for _item_id, article in batch]}
 
-    parsed, raw_output, _looks_structured = run_json_inference_meta(
-        _batch_system_prompt(),
-        _build_batch_user_prompt(batch),
-        max_tokens=max(180 * len(batch), 360),
-        temperature=0.3,
-        response_format=_batch_response_format(len(batch)),
+    light_mlx = resolve_pipeline_mlx_path("light", runtime_config)
+    heavy_mlx = resolve_pipeline_mlx_path("heavy", runtime_config)
+    use_light = light_mlx != heavy_mlx
+    chunk_size = max(
+        4,
+        min(
+            14,
+            _cfg_int(state, "batch_quick_compose_size", "BATCH_QUICK_COMPOSE_SIZE", 10),
+        ),
     )
+
     result_map: dict[str, dict[str, Any]] = {}
-    if isinstance(parsed, dict):
-        for item in parsed.get("articles", []) or []:
-            if isinstance(item, dict) and str(item.get("item_id", "")).strip():
-                result_map[str(item.get("item_id"))] = item
+    raw_tail = ""
+
+    def _merge_quick_items(parsed_obj: Any) -> None:
+        if not isinstance(parsed_obj, dict):
+            return
+        for item in parsed_obj.get("articles", []) or []:
+            if not isinstance(item, dict):
+                continue
+            iid = str(item.get("item_id", "") or "").strip()
+            if not iid:
+                continue
+            if not str(item.get("note_summary_vi", "") or "").strip() and str(item.get("summary_vi", "") or "").strip():
+                item = {**item, "note_summary_vi": str(item.get("summary_vi", "") or "").strip()}
+            result_map[iid] = item
+
+    total_chunks = max(1, math.ceil(len(batch) / chunk_size))
+    for chunk_index in range(0, len(batch), chunk_size):
+        sub_batch = batch[chunk_index : chunk_index + chunk_size]
+        logger.info(
+            "📝 Batch quick compose [%d/%d]: %d bài (chunk_size=%d)",
+            chunk_index // chunk_size + 1,
+            total_chunks,
+            len(sub_batch),
+            chunk_size,
+        )
+        user_blob = _build_batch_user_prompt(sub_batch)
+        fmt = _batch_response_format(len(sub_batch))
+        max_tok = max(220 * len(sub_batch), 480)
+
+        parsed, raw_output, _looks_structured = run_json_inference_meta(
+            _batch_system_prompt(compact_for_light_model=use_light),
+            user_blob,
+            max_tokens=max_tok,
+            temperature=0.3,
+            model_path=light_mlx if use_light else heavy_mlx,
+            response_format=fmt,
+        )
+        raw_tail = raw_output
+        _merge_quick_items(parsed)
+
+        sub_ids = [sid for sid, _ in sub_batch]
+        if use_light and sum(1 for sid in sub_ids if sid in result_map) < len(sub_batch):
+            logger.warning(
+                "⚠️ Quick compose light thiếu item chunk (%d/%d); thử heavy MLX.",
+                sum(1 for sid in sub_ids if sid in result_map),
+                len(sub_batch),
+            )
+            parsed_h, raw_h, _ = run_json_inference_meta(
+                _batch_system_prompt(compact_for_light_model=False),
+                user_blob,
+                max_tokens=max_tok,
+                temperature=0.3,
+                model_path=heavy_mlx,
+                response_format=fmt,
+            )
+            raw_tail = raw_h
+            _merge_quick_items(parsed_h)
 
     processed: list[dict[str, Any]] = []
     for item_id, article in batch:
@@ -125,8 +187,8 @@ def batch_quick_compose_node(state: dict[str, Any]) -> dict[str, Any]:
             note = sanitize_delivery_text(str(result.get("note_summary_vi", "") or "").strip())
             article["note_summary_vi"] = note or _fallback_note(article)
         else:
-            if raw_output:
-                logger.debug("Batch quick compose raw output sample: %s", raw_output[:240])
+            if raw_tail:
+                logger.debug("Batch quick compose raw output sample: %s", raw_tail[:240])
             article["note_summary_vi"] = _fallback_note(article)
         article.pop("_mvp3_grounding", None)
         processed.append(article)

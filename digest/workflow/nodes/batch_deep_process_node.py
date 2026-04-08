@@ -9,7 +9,7 @@ from typing import Any
 
 
 from digest.editorial.editorial_guardrails import build_article_grounding, sanitize_delivery_text
-from digest.runtime.mlx_runner import run_json_inference_meta
+from digest.runtime.mlx_runner import resolve_pipeline_mlx_path, run_json_inference_meta
 from digest.workflow.nodes.compose_note_summary import NOTE_SUMMARY_SYSTEM, _fallback_note
 from digest.workflow.nodes.deep_analysis import (
     DEEP_ANALYSIS_SYSTEM,
@@ -151,12 +151,26 @@ def _build_batch_user_prompt(batch: list[tuple[str, dict[str, Any]]]) -> str:
 
 
 def _fallback_bundle(article: dict[str, Any]) -> None:
-    # (giữ nguyên như cũ của Codex, không thay đổi)
     grounding = article.get("_mvp3_grounding", {}) or build_article_grounding(article)
-    # ... (copy nguyên phần _fallback_bundle cũ của bạn)
+    summary = str(article.get("factual_summary_vi", "") or article.get("summary_vi", "") or "").strip()[:900]
+    why = str(article.get("why_it_matters_vi", "") or "").strip()[:500]
+    analysis = (
+        "## Executive note\n"
+        f"{summary or 'Không có tóm tắt cấu trúc từ bước classify.'}\n\n"
+        "## Why it matters\n"
+        f"{why or 'Chưa xác định từ metadata.'}\n\n"
+        "## Evidence\n"
+        f"{grounding.get('fact_anchors_text', '- Chưa có fact anchor mạnh.')}\n\n"
+        "## Caveats / Unknowns\n"
+        f"{grounding.get('unknowns_text', '- Không có unknown lớn từ metadata.')}\n"
+    )
+    analysis = _ensure_evidence_sections(analysis, grounding)
     article["deep_analysis"] = analysis
     article["content_page_md"] = analysis
-    article["recommend_idea"] = "..."
+    title = str(article.get("title", "N/A"))[:160]
+    article["recommend_idea"] = (
+        f"Theo dõi diễn biến và xác minh thêm từ nguồn chính thức: {title}"
+    )
     article["note_summary_vi"] = _fallback_note(article)
 
 
@@ -199,11 +213,13 @@ def batch_deep_process_node(state: dict[str, Any]) -> dict[str, Any]:
 
         logger.info("🔬 Batch deep process chunk %d/%d (%d bài)", i//CHUNK_SIZE + 1, (len(top_articles)+CHUNK_SIZE-1)//CHUNK_SIZE, len(batch))
 
+        heavy_mlx = resolve_pipeline_mlx_path("heavy", runtime_config)
         parsed, raw_output, _ = run_json_inference_meta(
             _batch_system_prompt(),
             _build_batch_user_prompt(batch),
             max_tokens=max(4200 * len(batch), 9500),   # Tăng đáng kể
             temperature=0.25,                         # Giảm để ổn định
+            model_path=heavy_mlx,
             response_format=_batch_response_format(len(batch)),
         )
 

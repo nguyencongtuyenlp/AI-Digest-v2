@@ -1189,20 +1189,37 @@ def _search_ddg(query: str, max_results: int = 4, timelimit: str = "w") -> list[
     """
     DDG vẫn hữu ích để mở rộng coverage, nhưng vì hay lỗi nên chỉ coi là lớp bổ sung.
     Mọi exception đều bị nuốt mềm để pipeline không chết theo DDG.
-    Ưu tiên backend thuần-httpx để tránh lỗi abort ở nhánh primp khi DNS/network chập chờn.
+    Thử lần lượt backend (duckduckgo hay lỗi TLS 0x304 trên macOS LibreSSL → fallback bing/mojeek).
     """
-    try:
-        with DDGS(timeout=10) as ddgs:
-            results = list(
-                ddgs.text(
-                    query,
-                    max_results=max_results * 2,
-                    timelimit=timelimit,
-                    backend=SAFE_DDGS_TEXT_BACKEND,
+    backends: list[str] = []
+    primary = SAFE_DDGS_TEXT_BACKEND
+    if primary:
+        backends.append(primary)
+    for alt in ("bing", "mojeek", "duckduckgo"):
+        if alt not in backends:
+            backends.append(alt)
+
+    results: list[dict[str, Any]] = []
+    last_exc: Exception | None = None
+    for backend in backends:
+        try:
+            with DDGS(timeout=12) as ddgs:
+                results = list(
+                    ddgs.text(
+                        query,
+                        max_results=max_results * 2,
+                        timelimit=timelimit,
+                        backend=backend,
+                    )
                 )
-            )
-    except Exception as exc:
-        logger.warning("DDG search failed for '%s': %s", query, exc)
+            if results:
+                break
+        except Exception as exc:
+            last_exc = exc
+            continue
+
+    if not results and last_exc is not None:
+        logger.warning("DDG search failed for '%s': %s", query, last_exc)
         return []
 
     filtered: list[dict[str, Any]] = []

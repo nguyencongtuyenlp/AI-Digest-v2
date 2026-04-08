@@ -1,3 +1,4 @@
+import os
 import sys
 import unittest
 from pathlib import Path
@@ -160,8 +161,13 @@ class MVP3SpeedOptimizedTest(unittest.TestCase):
             "Đội build agent có thêm primitive để triển khai production nhanh hơn.",
         )
 
+    @patch.dict(os.environ, {"MLX_LIGHT_MODEL": ""}, clear=False)
     @patch("digest.workflow.nodes.batch_classify_and_score_node.write_temporal_snapshot", return_value="reports/mock.json")
     @patch("digest.workflow.nodes.classify_and_score.call_xai_structured_json")
+    @patch(
+        "digest.workflow.nodes.classify_and_score.run_json_inference",
+        side_effect=[(None, "", False)] * 6,
+    )
     @patch("digest.workflow.nodes.batch_classify_and_score_node.single_article_json_inference")
     @patch(
         "digest.workflow.nodes.batch_classify_and_score_node.run_json_inference_meta",
@@ -197,6 +203,7 @@ class MVP3SpeedOptimizedTest(unittest.TestCase):
         self,
         _mock_batch_infer,
         mock_single_article_infer,
+        _mock_classify_local_infer,
         mock_grok_json,
         _mock_snapshot,
     ) -> None:

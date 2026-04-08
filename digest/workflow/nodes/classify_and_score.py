@@ -40,7 +40,7 @@ from digest.editorial.delivery_policy import (
     is_github_main_brief_significant,
     is_github_signal_article,
 )
-from digest.runtime.mlx_runner import run_json_inference_meta
+from digest.runtime.mlx_runner import resolve_pipeline_mlx_path, run_json_inference_meta
 from digest.editorial.editorial_guardrails import sanitize_delivery_text
 from digest.sources.source_catalog import classify_source_kind
 from digest.runtime.temporal_snapshots import write_temporal_snapshot
@@ -807,6 +807,9 @@ CLASSIFY_RESPONSE_FORMAT: dict[str, Any] = {
                 "c3_score",
                 "c3_reason",
                 "summary_vi",
+                "factual_summary_vi",
+                "why_it_matters_vi",
+                "optional_editorial_angle",
                 "editorial_angle",
                 "analysis_tier",
                 "tags",
@@ -894,6 +897,7 @@ def run_json_inference(
     max_tokens: int,
     temperature: float,
     response_format: dict[str, Any] | None = None,
+    model_path: str | None = None,
 ) -> tuple[dict | list | None, str, bool]:
     """
     Local compatibility wrapper for classify inference.
@@ -906,6 +910,7 @@ def run_json_inference(
         user_prompt,
         max_tokens=max_tokens,
         temperature=temperature,
+        model_path=model_path,
         response_format=response_format,
     )
 
@@ -1328,6 +1333,7 @@ def _resolve_classify_inference_details(
     temperature: float,
     initial_response: Any | None = None,
     runtime_config: dict[str, Any] | None = None,
+    local_model_path: str | None = None,
 ) -> tuple[dict[str, Any] | None, str | None, str, str, dict[str, Any]]:
     def _parsed_or_repaired(response: Any) -> tuple[dict[str, Any] | None, str | None, str, bool]:
         parsed, raw, looks_structured = _normalize_classify_inference_response(response)
@@ -1359,6 +1365,7 @@ def _resolve_classify_inference_details(
             max_tokens=max_tokens,
             temperature=temperature,
             response_format=CLASSIFY_RESPONSE_FORMAT,
+            model_path=local_model_path,
         )
 
     result, status, raw, _ = _parsed_or_repaired(initial_response)
@@ -1384,6 +1391,7 @@ def _resolve_classify_inference_details(
             max_tokens=max_tokens,
             temperature=0.0,
             response_format=CLASSIFY_RESPONSE_FORMAT,
+            model_path=local_model_path,
         )
     )
     if retry_result is not None:
@@ -1411,6 +1419,7 @@ def _resolve_classify_inference_details(
             max_tokens=min(max_tokens, 220),
             temperature=0.0,
             response_format=CLASSIFY_RESPONSE_FORMAT,
+            model_path=local_model_path,
         )
     )
     if final_result is not None:
@@ -1453,6 +1462,7 @@ def _resolve_classify_inference(
     temperature: float,
     initial_response: Any | None = None,
     runtime_config: dict[str, Any] | None = None,
+    local_model_path: str | None = None,
 ) -> tuple[dict[str, Any] | None, str | None, str]:
     result, status, raw, _provider_used, _details = _resolve_classify_inference_details(
         user_prompt,
@@ -1460,6 +1470,7 @@ def _resolve_classify_inference(
         temperature=temperature,
         initial_response=initial_response,
         runtime_config=runtime_config,
+        local_model_path=local_model_path,
     )
     return result, status, raw
 
@@ -2854,12 +2865,14 @@ def classify_and_score_node(state: dict[str, Any]) -> dict[str, Any]:
         )
 
         try:
+            light_mlx = resolve_pipeline_mlx_path("light", runtime_config)
             initial_inference = run_json_inference(
                 CLASSIFY_SCORE_SYSTEM,
                 user_prompt,
                 max_tokens=classify_max_tokens,
                 temperature=0.1,
                 response_format=CLASSIFY_RESPONSE_FORMAT,
+                model_path=light_mlx,
             )
             result, json_status, raw_output, provider_used, provider_details = _resolve_classify_inference_details(
                 user_prompt,
@@ -2867,6 +2880,7 @@ def classify_and_score_node(state: dict[str, Any]) -> dict[str, Any]:
                 temperature=0.1,
                 initial_response=initial_inference,
                 runtime_config=runtime_config,
+                local_model_path=light_mlx,
             )
             provider_key = str(provider_used or "local")
             if provider_key not in classify_provider_counts:

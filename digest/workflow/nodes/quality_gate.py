@@ -39,6 +39,8 @@ def quality_gate_node(state: dict[str, Any]) -> dict[str, Any]:
     """
     # Quality gate nên nhìn cùng tập bài mà brief đang dùng, tránh validate một đằng gửi một nẻo.
     briefing_articles = list(state.get("telegram_candidates", []) or [])
+    if not briefing_articles:
+        briefing_articles = list(state.get("final_articles", []) or [])
     notion_pages = list(state.get("notion_pages", []))
     summary = str(state.get("summary_vn", "") or "")
     telegram_messages = list(state.get("telegram_messages", []) or [])

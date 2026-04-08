@@ -23,6 +23,7 @@ from typing import Any
 
 from digest.runtime.runtime_presets import apply_runtime_preset
 from digest.runtime.mlx_runner import clear_runtime_mlx_model_path, set_runtime_mlx_model_path
+from digest.runtime.xai_grok import reset_grok_http_budget
 from digest.runtime.run_health import collect_source_health, notify_source_health_if_needed
 
 logger = logging.getLogger(__name__)
@@ -159,6 +160,7 @@ def run_pipeline(
     with _runtime_model_override(initial_state.get("runtime_config", {})):
         with _pipeline_run_lock():
             start = datetime.now(timezone.utc)
+            reset_grok_http_budget()
 
             # Chạy health check trước để biết nguồn nào đang hỏng ngay trong report của run này.
             source_health = collect_source_health()

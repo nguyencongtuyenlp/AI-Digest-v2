@@ -12,7 +12,7 @@ import logging
 from typing import Any
 
 from digest.editorial.editorial_guardrails import build_article_grounding, sanitize_delivery_text
-from digest.runtime.mlx_runner import run_inference
+from digest.runtime.mlx_runner import resolve_pipeline_mlx_path, run_inference
 
 logger = logging.getLogger(__name__)
 
@@ -138,6 +138,7 @@ def compose_note_summary_node(state: dict[str, Any]) -> dict[str, Any]:
                 user_prompt,
                 max_tokens=220,
                 temperature=0.3,
+                model_path=resolve_pipeline_mlx_path("light", runtime_config),
             ).strip()
             article["note_summary_vi"] = sanitize_delivery_text(note) or _fallback_note(article)
         except Exception as e:

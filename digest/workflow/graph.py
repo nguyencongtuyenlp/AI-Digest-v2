@@ -9,7 +9,6 @@ from time import perf_counter
 from typing import Annotated, Any, TypedDict
 
 from langgraph.graph import StateGraph, END
-from langgraph.types import Send
 
 from digest.runtime.stage_metrics import build_stage_timing_entry
 
@@ -97,35 +96,6 @@ from digest.workflow.nodes.send_telegram import send_telegram_node
 from digest.workflow.nodes.generate_run_report import generate_run_report_node
 
 
-def _chunk_top_articles_for_parallel_send(state: DigestState) -> list[Send]:
-    """Fan-out top_articles theo chunk"""
-    top_articles = list(state.get("top_articles", []) or [])
-    if not top_articles:
-        return []
-    runtime_config = dict(state.get("runtime_config", {}) or {})
-    chunk_size = max(1, int(runtime_config.get("batch_deep_process_chunk_size", 3)))
-    sends: list[Send] = []
-    for i in range(0, len(top_articles), chunk_size):
-        sends.append(Send("batch_deep_process", {
-            "top_articles": top_articles[i:i+chunk_size],
-            "runtime_config": runtime_config,
-            "run_profile": state.get("run_profile", ""),
-        }))
-    return sends
-
-
-def _route_batch_after_classify(state: DigestState) -> list[Send]:
-    """MVP3 Speed Optimized - Batch + Parallel"""
-    sends: list[Send] = _chunk_top_articles_for_parallel_send(state)
-    low_articles = list(state.get("low_score_articles", []) or [])
-    if low_articles:
-        sends.append(Send("batch_quick_compose", {
-            "low_score_articles": low_articles,
-            "runtime_config": dict(state.get("runtime_config", {}) or {}),
-        }))
-    return sends
-
-
 def _merge_processed_articles_node(state: DigestState) -> dict[str, Any]:
     """Merge sạch sẽ"""
     analyzed = list(state.get("analyzed_articles", []) or [])
@@ -182,8 +152,9 @@ def build_graph() -> StateGraph:
     graph.add_edge("collect_feedback", "early_rule_filter")
     graph.add_edge("early_rule_filter", "batch_classify_and_score")
 
-    graph.add_conditional_edges("batch_classify_and_score", _route_batch_after_classify)
-    graph.add_edge("batch_deep_process", "merge_processed_articles")
+    # Tuần tự deep → quick để tránh gọi MLX/Metal song song (LangGraph Send chạy parallel).
+    graph.add_edge("batch_classify_and_score", "batch_deep_process")
+    graph.add_edge("batch_deep_process", "batch_quick_compose")
     graph.add_edge("batch_quick_compose", "merge_processed_articles")
     graph.add_edge("merge_processed_articles", "delivery_judge")
     graph.add_edge("delivery_judge", "save_notion")

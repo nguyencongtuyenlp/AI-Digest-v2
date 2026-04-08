@@ -20,6 +20,36 @@ import requests
 
 logger = logging.getLogger(__name__)
 
+# Optional cap: GROK_MAX_HTTP_CALLS_PER_RUN=80 — reset mỗi lần pipeline_runner.run_pipeline bắt đầu.
+_grok_http_calls_this_run = 0
+
+
+def reset_grok_http_budget() -> None:
+    global _grok_http_calls_this_run
+    _grok_http_calls_this_run = 0
+
+
+def _grok_http_budget_try_consume() -> bool:
+    global _grok_http_calls_this_run
+    raw = os.getenv("GROK_MAX_HTTP_CALLS_PER_RUN", "").strip()
+    if not raw:
+        _grok_http_calls_this_run += 1
+        return True
+    try:
+        limit = int(raw)
+    except (TypeError, ValueError):
+        _grok_http_calls_this_run += 1
+        return True
+    if limit <= 0:
+        _grok_http_calls_this_run += 1
+        return True
+    if _grok_http_calls_this_run >= limit:
+        logger.warning("Grok HTTP budget exhausted (GROK_MAX_HTTP_CALLS_PER_RUN=%s)", limit)
+        return False
+    _grok_http_calls_this_run += 1
+    return True
+
+
 VALID_LANES = {
     "Product",
     "Society & Culture",
@@ -623,11 +653,12 @@ def _xai_base_url() -> str:
 
 
 def _xai_timeout_seconds() -> int:
-    raw = os.getenv("GROK_DELIVERY_TIMEOUT_SECONDS", "35")
+    # X search / responses hay >35s; tăng mặc định để giảm timeout giữa chừng khi key env chưa set.
+    raw = os.getenv("GROK_DELIVERY_TIMEOUT_SECONDS", "60")
     try:
-        return max(5, min(120, int(raw)))
+        return max(5, min(180, int(raw)))
     except (TypeError, ValueError):
-        return 35
+        return 60
 
 
 def _compact_text(value: Any, limit: int = 280) -> str:
@@ -776,6 +807,8 @@ def _call_xai_json(
     api_key = os.getenv("XAI_API_KEY", "").strip()
     if not api_key:
         return {}
+    if not _grok_http_budget_try_consume():
+        return {}
 
     payload = {
         "model": grok_delivery_model(),
@@ -885,6 +918,8 @@ def _call_xai_responses_with_web_search(
     api_key = os.getenv("XAI_API_KEY", "").strip()
     if not api_key:
         return {}
+    if not _grok_http_budget_try_consume():
+        return {}
 
     payload = {
         "model": grok_scout_model(),
@@ -931,6 +966,8 @@ def _call_xai_responses_with_x_search(
 ) -> dict[str, Any]:
     api_key = os.getenv("XAI_API_KEY", "").strip()
     if not api_key:
+        return {}
+    if not _grok_http_budget_try_consume():
         return {}
 
     filters: dict[str, Any] = {}
